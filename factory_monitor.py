@@ -38,10 +38,15 @@ DB_FILE             = os.path.join(DOWNLOAD_DIR, "history.db")
 URL                 = "http://192.168.1.210/csv/OutputCSVWeb.aspx?FactoryID=1&AreaID=1"
 WAIT_TIME           = 300
 HOURS_BACK          = 1
-ALERT_THRESHOLD_MIN = 60
+ALERT_THRESHOLD_MIN = 45
 
 TELEGRAM_TOKEN   = "8474596481:AAEGyP1nB0vuRo4DkCLwzDbBXDV7Lab7lvU"
 TELEGRAM_CHAT_ID = "656625394"
+
+GITHUB_TOKEN = "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"
+GITHUB_USER  = "wisefab1"
+GITHUB_REPO  = "factory_monitor"
+GITHUB_URL   = "https://wisefab1.github.io/factory_monitor/"
 
 # =============================================================================
 # PART 1 — DOWNLOAD
@@ -331,12 +336,50 @@ def build_timeline_data(rows, period_from, period_to):
         result[mname] = segments
     return result
 
+# ── GitHub Pages publish ──────────────────────────────────────────────────────
+def publish_to_github(html: str) -> bool:
+    """Push index.html to GitHub Pages via API — no git install required."""
+    import base64
+    try:
+        api     = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/index.html"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type":  "application/json",
+            "Accept":        "application/vnd.github+json",
+        }
+        # Отримуємо SHA якщо файл вже існує
+        sha = None
+        try:
+            req = urllib.request.Request(api, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                sha = json.loads(r.read().decode())["sha"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+        # Пушимо файл
+        payload = {
+            "message": f"update {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "content": base64.b64encode(html.encode("utf-8")).decode(),
+        }
+        if sha:
+            payload["sha"] = sha
+        req = urllib.request.Request(
+            api, data=json.dumps(payload).encode(),
+            headers=headers, method="PUT"
+        )
+        urllib.request.urlopen(req, timeout=20)
+        print(f"Published: {GITHUB_URL}")
+        return True
+    except Exception as e:
+        print(f"GitHub publish error: {e}")
+        return False
+
 def check_and_alert(downtimes, period_to):
     alerts = [(m, d) for m, dd in downtimes.items()
               for d in dd["downtimes"] if d["duration"] >= ALERT_THRESHOLD_MIN]
     if not alerts:
         return
-    lines = [f"⚠️ <b>Machine Downtime Alert</b>  {period_to.strftime('%H:%M')}"]
+    lines = [f"⚠️ <b>Machine Downtime Alert</b>  {period_to.strftime('%H:%M')}\n🔗 <a href=\"{GITHUB_URL}\">Open report</a>"]
     for mname, d in alerts:
         short = mname.split("_")[0]
         end_s = d["end"].strftime("%H:%M") if d.get("end") else "ongoing"
@@ -802,6 +845,10 @@ def main():
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Report saved: {OUTPUT_HTML}")
+
+    # Step 5 — publish to GitHub Pages
+    print("── Step 5: Publishing to GitHub Pages ──")
+    publish_to_github(html)
 
 if __name__ == "__main__":
     main()
