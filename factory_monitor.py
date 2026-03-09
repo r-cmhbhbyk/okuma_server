@@ -2434,7 +2434,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 
     machines_html = ""
     machine_names = sorted(cycles.keys())
-    nav_buttons = "".join(
+    nav_buttons = (
+        '<button class="nav-btn nav-tab-btn active" id="tbtn-today" onclick="switchTab(\'today\')">Today</button>\n'
+        '<button class="nav-btn nav-tab-btn" id="tbtn-stats" onclick="switchTab(\'stats\')">Statistics</button>\n'
+        '<div style="border-top:1px solid #475569;margin:4px 0"></div>\n'
+    ) + "".join(
         f'<a href="#machine-{mn.split("_")[0] if "_" in mn else mn}" class="nav-btn">{mn.split("_")[0] if "_" in mn else mn}</a>\n'
         for mn in machine_names
     )
@@ -2665,16 +2669,14 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       align-items:center;justify-content:center;
       box-shadow:2px 0 8px rgba(0,0,0,.35);
     }}
-    #nav-toggle.hidden{{display:none}}
+    #nav-toggle{{display:flex!important}}
+    #nav-toggle.hidden{{display:flex!important}}
     .nav-btn{{display:block;padding:8px 14px;font-size:0.82rem;white-space:nowrap;border-radius:6px;width:100%;text-align:left;background:#1e293b;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:background .15s}}
     /* Scroll-top */
     #scroll-top{{right:12px;left:auto;bottom:20px;width:40px;height:40px;font-size:1.2rem}}
   }}
-  /* sticky */
-  .header{{position:sticky;top:0;z-index:500}}
-  .tabs{{display:none}}
-  .tab-btn{{padding:5px 16px;border:none;border-radius:5px;cursor:pointer;font-size:0.82rem;font-weight:600;background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.75);transition:all .15s}}
-  .tab-btn.active{{background:#fff;color:#1450CF}}
+  .nav-tab-btn{{background:#1450CF!important;color:#fff!important}}
+  .nav-tab-btn.active{{background:#3b82f6!important;box-shadow:0 0 0 2px #fff}}
   /* nav sidebar (desktop) */
   @media(min-width:601px){{
     .nav-sidebar{{position:fixed;left:8px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:5px;z-index:1000;background:transparent;width:auto;padding:0}}
@@ -2707,16 +2709,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 <body>
 <div class="header">
   <h1>📊 Machine Report</h1>
-  <div class="header-tabs">
-    <button class="tab-btn active" onclick="switchTab('today')">Today</button>
-    <button class="tab-btn" onclick="switchTab('stats')">Statistics</button>
-  </div>
   <div class="meta">
     Period: {period_str}<br>
     Generated: {generated}
   </div>
 </div>
-<div class="tabs"></div>
 <div id="tab-today">
 <div class="container">
   <div class="legend">
@@ -3019,21 +3016,16 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 function switchTab(name){{
   document.getElementById('tab-today').style.display=name==='today'?'':'none';
   document.getElementById('tab-stats').style.display=name==='stats'?'':'none';
-  document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.toggle('active',b.textContent.toLowerCase().includes(name==='today'?'today':'stat'));}});
+  var t1=document.getElementById('tbtn-today');
+  var t2=document.getElementById('tbtn-stats');
+  if(t1) t1.classList.toggle('active',name==='today');
+  if(t2) t2.classList.toggle('active',name==='stats');
+  // close drawer on mobile after tab switch
   var nav=document.getElementById('nav-sidebar');
-  var toggle=document.getElementById('nav-toggle');
   var overlay=document.getElementById('nav-overlay');
-  if(window.innerWidth>600){{
-    if(nav) nav.style.display=name==='today'?'':'none';
-  }} else {{
-    // mobile: ховаємо drawer і toggle на Stats
-    if(name!=='today'){{
-      if(nav){{nav.classList.remove('open');}}
-      if(overlay){{overlay.classList.remove('open');}}
-      if(toggle) toggle.classList.add('hidden');
-    }} else {{
-      if(toggle) toggle.classList.remove('hidden');
-    }}
+  if(window.innerWidth<=600){{
+    if(nav) nav.classList.remove('open');
+    if(overlay) overlay.classList.remove('open');
   }}
 }}
 </script>
