@@ -2643,46 +2643,32 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.75rem}}
     .chart-legend{{gap:6px}}
     .leg-item{{font-size:0.72rem}}
-    /* Nav drawer — виїжджає зліва */
-    .nav-sidebar{{
-      position:fixed;top:0;left:0;bottom:0;width:fit-content;
-      transform:translateX(-100%);
-      transition:transform .25s ease;
-      display:flex;flex-direction:column;
-      background:transparent;padding:56px 8px 16px;gap:6px;
-      z-index:1500;border-top:none;
-      overflow-y:auto;
-    }}
-    .nav-sidebar.open{{transform:translateX(0)}}
-    /* Overlay за drawer */
-    #nav-overlay{{
-      display:none;position:fixed;inset:0;
-      background:rgba(0,0,0,.45);z-index:1400;
-    }}
-    #nav-overlay.open{{display:block}}
-    /* Кнопка-тригер (tab Today only) */
-    #nav-toggle{{
-      display:flex;position:fixed;left:0;top:50%;transform:translateY(-50%);
-      width:26px;height:52px;background:#1e293b;color:#fff;
-      border:none;border-radius:0 8px 8px 0;
-      font-size:1rem;cursor:pointer;z-index:1300;
-      align-items:center;justify-content:center;
-      box-shadow:2px 0 8px rgba(0,0,0,.35);
-    }}
-    #nav-toggle{{display:flex!important}}
-    #nav-toggle.hidden{{display:flex!important}}
-    .nav-btn{{display:block;padding:8px 14px;font-size:0.82rem;white-space:nowrap;border-radius:6px;width:100%;text-align:left;background:#1e293b;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:background .15s}}
     /* Scroll-top */
     #scroll-top{{right:12px;left:auto;bottom:20px;width:40px;height:40px;font-size:1.2rem}}
   }}
+  /* Nav drawer (all screens) */
+  .nav-sidebar{{
+    position:fixed;top:0;left:0;bottom:0;width:fit-content;
+    transform:translateX(-100%);
+    transition:transform .25s ease;
+    display:flex;flex-direction:column;
+    background:transparent;padding:60px 8px 16px;gap:6px;
+    z-index:1500;overflow-y:auto;
+  }}
+  .nav-sidebar.open{{transform:translateX(0)}}
+  #nav-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1400;}}
+  #nav-overlay.open{{display:block}}
+  #nav-toggle{{
+    display:flex;position:fixed;left:0;top:50%;transform:translateY(-50%);
+    width:26px;height:52px;background:#1e293b;color:#fff;
+    border:none;border-radius:0 8px 8px 0;font-size:1rem;cursor:pointer;
+    z-index:1600;align-items:center;justify-content:center;
+    box-shadow:2px 0 8px rgba(0,0,0,.35);
+  }}
+  .nav-btn{{display:block;padding:8px 14px;font-size:0.82rem;white-space:nowrap;border-radius:6px;width:100%;text-align:left;background:#1e293b;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:background .15s}}
+  .nav-btn:hover{{background:#3b82f6}}
   .nav-tab-btn{{background:#1450CF!important;color:#fff!important}}
   .nav-tab-btn.active{{background:#3b82f6!important;box-shadow:0 0 0 2px #fff}}
-  /* nav sidebar (desktop) */
-  @media(min-width:601px){{
-    .nav-sidebar{{position:fixed;left:8px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:5px;z-index:1000;background:transparent;width:auto;padding:0}}
-    .nav-btn{{display:block;padding:7px 12px;background:#1e293b;color:#fff;border-radius:6px;font-size:0.78rem;font-weight:700;text-decoration:none;text-align:center;transition:background .15s;box-shadow:0 2px 6px rgba(0,0,0,0.25)}}
-    .nav-btn:hover{{background:#3b82f6}}
-  }}
   /* scroll top */
   #scroll-top{{position:fixed;bottom:24px;left:8px;width:44px;height:44px;border-radius:50%;background:#1e293b;color:#fff;border:none;font-size:1.4rem;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);display:none;align-items:center;justify-content:center;z-index:2000;transition:background .15s}}
   #scroll-top:hover{{background:#3b82f6}}
@@ -2977,6 +2963,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     }}
   }}
 
+  window.initToday=initToday;
   window.updatePeriodChart=updatePeriodChart;
   window.setRange=function(n){{
     var to=new Date(),from=new Date();from.setDate(to.getDate()-n+1);
@@ -2984,13 +2971,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     document.getElementById('stat-to').value=to.toISOString().slice(0,10);
     updatePeriodChart();
   }};
-
-  // Ініціалізація при відкритті вкладки
-  document.querySelectorAll('.tab-btn').forEach(function(b){{
-    b.addEventListener('click',function(){{
-      if(b.textContent==='Statistics'){{ setTimeout(function(){{requestAnimationFrame(function(){{initToday();setRange(7);}});}},80); }}
-    }});
-  }});
   // Scroll-to-top
   var stBtn=document.getElementById('scroll-top');
   if(stBtn) window.addEventListener('scroll',function(){{stBtn.classList.toggle('visible',window.scrollY>400);}});
@@ -3020,13 +3000,17 @@ function switchTab(name){{
   var t2=document.getElementById('tbtn-stats');
   if(t1) t1.classList.toggle('active',name==='today');
   if(t2) t2.classList.toggle('active',name==='stats');
-  // close drawer on mobile after tab switch
+  if(name==='stats'){{
+    setTimeout(function(){{requestAnimationFrame(function(){{
+      if(window.initToday) window.initToday();
+      if(window.setRange)  window.setRange(7);
+    }});}},80);
+  }}
+  // close drawer after tab switch
   var nav=document.getElementById('nav-sidebar');
   var overlay=document.getElementById('nav-overlay');
-  if(window.innerWidth<=600){{
-    if(nav) nav.classList.remove('open');
-    if(overlay) overlay.classList.remove('open');
-  }}
+  if(nav) nav.classList.remove('open');
+  if(overlay) overlay.classList.remove('open');
 }}
 </script>
 </body>
