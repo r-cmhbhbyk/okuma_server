@@ -50,13 +50,22 @@ ALL_MACHINES = ["M1_M560R-V-e_0712-100198", "M2_M560R-V-e-M5V01235",
                 "T1_L300E-M_PEA351",        "T2_ L300-MYW-e_MYW197",
                 "T3_LB2000EXII_254633"]
 
-TELEGRAM_TOKEN   = "8474596481:AAEGyP1nB0vuRo4DkCLwzDbBXDV7Lab7lvU"
-TELEGRAM_CHAT_ID = "656625394"
-
-GITHUB_TOKEN = "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"
 GITHUB_USER  = "wisefab1"
 GITHUB_REPO  = "factory_monitor"
 GITHUB_URL   = "https://wisefab1.github.io/factory_monitor/"
+
+# ── Secrets (завантажуються з файлу, не зберігаються в коді) ─────────────────
+_SECRETS_FILE = os.path.join(DOWNLOAD_DIR, "secrets.json")
+def _load_secrets():
+    try:
+        with open(_SECRETS_FILE, encoding="utf-8") as _f:
+            return json.load(_f)
+    except Exception:
+        return {}
+_secrets         = _load_secrets()
+TELEGRAM_TOKEN   = _secrets.get("telegram_token",   "")
+TELEGRAM_CHAT_ID = _secrets.get("telegram_chat_id", "")
+GITHUB_TOKEN     = _secrets.get("github_token",     "")
 
 TARGET_TIME_FILE = r"\\wisefile\Wisefile\WF_Tootmine\Planeerimine\CNC toodete ajad pildid\CNC tehno.xlsm"
 TARGET_CACHE_FILE = os.path.join(DOWNLOAD_DIR, "target_times_cache.json")  # Кеш файл
@@ -1925,9 +1934,9 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             _site_t = _ww * _n_machines
             _all_daily[_d2]["SITE"] = min(100, round(_sd.get("r",0) / _site_t * 100))
         else:
-            # сб/нд: рахуємо по фактичних total_min активних машин
+            # сб/нд: тільки активні станки (робота у вихідні — бонус)
             _active_eff = [v for k,v in _all_daily[_d2].items() if k != "SITE" and v > 0]
-            _all_daily[_d2]["SITE"] = round(sum(_active_eff) / _n_machines) if _active_eff else 0
+            _all_daily[_d2]["SITE"] = round(sum(_active_eff) / len(_active_eff)) if _active_eff else 0
     _mk_list  = sorted(_mk_set) + ["SITE"]
     _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["SITE"]
     _col_list = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#a855f7","#06b6d4","#f97316","#ec4899"][:len(_mk_list)]
@@ -2595,40 +2604,59 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
      MOBILE  ≤ 600px
   ══════════════════════════════════════════ */
   @media(max-width:600px){{
-    body{{font-size:14px}}
-    .header{{padding:12px 14px}}
-    .header h1{{font-size:1rem}}
-    .container{{padding:0 8px;margin:10px auto}}
-    .machine-card{{border-radius:8px;margin-bottom:14px}}
-    .machine-header{{padding:12px 12px}}
-    .machine-id{{font-size:1rem}}
-    .eff-badge{{font-size:.78rem;padding:4px 10px}}
-    .eff-detail{{display:none}}          /* прибираємо (x/y min) на малих екранах */
-    .section-title{{padding:8px 12px 4px;font-size:.75rem}}
-
-    /* Таблиці — горизонтальний скрол замість truncate */
+    body{{font-size:14px;padding-bottom:54px}} /* місце для bottom nav */
+    .header{{padding:10px 12px}}
+    .header h1{{font-size:0.95rem}}
+    .header-tabs{{gap:3px}}
+    .tab-btn{{padding:4px 10px;font-size:0.75rem}}
+    .container{{padding:0 6px;margin:8px auto}}
+    .machine-card{{border-radius:6px;margin-bottom:10px}}
+    /* machine-header — стак вертикально */
+    .machine-header{{padding:10px 12px;flex-direction:column;align-items:flex-start;gap:6px}}
+    .eff-badge{{font-size:.8rem;padding:4px 10px;align-self:stretch;text-align:center}}
+    .eff-detail{{display:none}}
+    .section-title{{padding:7px 12px 4px;font-size:.72rem}}
+    /* Таблиці */
     .table-scroll-x{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
-    table,.scroll-table{{font-size:.78rem;min-width:360px}}
-    th,td,.scroll-table th,.scroll-table td{{padding:7px 9px}}
-
-    /* Timeline — тікі тільки кожні 30 хв */
-
-
-    /* Tooltip — завжди знизу екрану на mobile */
+    table,.scroll-table{{font-size:.75rem;min-width:300px}}
+    th,td,.scroll-table th,.scroll-table td{{padding:6px 8px}}
+    /* Resizable — прибираємо resize handle на touch */
+    .resizable-section{{resize:none}}
+    /* Tooltip */
     #tl-tooltip{{
-      position:fixed;bottom:12px;left:50%;transform:translateX(-50%);
+      position:fixed;bottom:62px;left:50%;transform:translateX(-50%);
       top:auto!important;max-width:92vw;text-align:center
     }}
-
-    .legend{{padding:4px 12px 8px;font-size:.74rem;gap:10px}}
-    .footer{{font-size:.7rem;padding:12px}}
+    .legend{{padding:4px 10px 8px;font-size:.72rem;gap:8px}}
+    .footer{{font-size:.7rem;padding:10px 10px 20px}}
+    /* Stats */
+    .chart-wrap{{height:220px}}
+    .chart-panel{{padding:12px 10px}}
+    .stats-controls{{gap:6px}}
+    .stats-controls label{{font-size:0.78rem}}
+    .stats-controls input[type=date]{{font-size:0.78rem;padding:4px 6px;max-width:130px}}
+    .stats-controls button{{padding:5px 10px;font-size:0.75rem}}
+    .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.75rem}}
+    .chart-legend{{gap:6px}}
+    .leg-item{{font-size:0.72rem}}
+    /* Nav sidebar → горизонтальна смуга знизу */
+    .nav-sidebar{{
+      position:fixed;bottom:0;left:0;right:0;top:auto;
+      transform:none;flex-direction:row;
+      overflow-x:auto;-webkit-overflow-scrolling:touch;
+      background:#1e293b;padding:6px 8px;gap:4px;
+      border-top:1px solid #334155;
+    }}
+    .nav-btn{{padding:5px 12px;font-size:0.72rem;white-space:nowrap;flex-shrink:0;border-radius:4px}}
+    /* Scroll-top — вправо, вище nav bar */
+    #scroll-top{{right:12px;left:auto;bottom:54px;width:40px;height:40px;font-size:1.2rem}}
   }}
   /* sticky */
   .header{{position:sticky;top:0;z-index:500}}
   .tabs{{display:none}}
   .tab-btn{{padding:5px 16px;border:none;border-radius:5px;cursor:pointer;font-size:0.82rem;font-weight:600;background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.75);transition:all .15s}}
   .tab-btn.active{{background:#fff;color:#1450CF}}
-  /* nav sidebar */
+  /* nav sidebar (desktop) */
   .nav-sidebar{{position:fixed;left:8px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:5px;z-index:1000}}
   .nav-btn{{display:block;padding:7px 12px;background:#1e293b;color:#fff;border-radius:6px;font-size:0.78rem;font-weight:700;text-decoration:none;text-align:center;transition:background .15s;box-shadow:0 2px 6px rgba(0,0,0,0.25)}}
   .nav-btn:hover{{background:#3b82f6}}
@@ -2903,6 +2931,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
     tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:opts()}});
+    requestAnimationFrame(function(){{tCh.resize();}});
     leg('legend-today',d2);
   }}
 
@@ -2939,7 +2968,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   // Ініціалізація при відкритті вкладки
   document.querySelectorAll('.tab-btn').forEach(function(b){{
     b.addEventListener('click',function(){{
-      if(b.textContent==='Statistics'){{ setTimeout(function(){{initToday();setRange(7);}},50); }}
+      if(b.textContent==='Statistics'){{ setTimeout(function(){{requestAnimationFrame(function(){{initToday();setRange(7);}});}},80); }}
     }});
   }});
   // Scroll-to-top
@@ -2952,7 +2981,7 @@ function switchTab(name){{
   document.getElementById('tab-stats').style.display=name==='stats'?'':'none';
   document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.toggle('active',b.textContent.toLowerCase().includes(name==='today'?'today':'stat'));}});
   var nav=document.querySelector('.nav-sidebar');
-  if(nav)nav.style.display=name==='today'?'':'none';
+  if(nav&&window.innerWidth>600)nav.style.display=name==='today'?'':'none';
 }}
 </script>
 </body>
