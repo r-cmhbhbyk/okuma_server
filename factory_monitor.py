@@ -2604,7 +2604,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
      MOBILE  ≤ 600px
   ══════════════════════════════════════════ */
   @media(max-width:600px){{
-    body{{font-size:14px;padding-bottom:54px}} /* місце для bottom nav */
+    body{{font-size:14px}}
     .header{{padding:10px 12px}}
     .header h1{{font-size:0.95rem}}
     .header-tabs{{gap:3px}}
@@ -2624,7 +2624,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     .resizable-section{{resize:none}}
     /* Tooltip */
     #tl-tooltip{{
-      position:fixed;bottom:62px;left:50%;transform:translateX(-50%);
+      position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
       top:auto!important;max-width:92vw;text-align:center
     }}
     .legend{{padding:4px 10px 8px;font-size:.72rem;gap:8px}}
@@ -2639,17 +2639,36 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.75rem}}
     .chart-legend{{gap:6px}}
     .leg-item{{font-size:0.72rem}}
-    /* Nav sidebar → горизонтальна смуга знизу */
+    /* Nav drawer — виїжджає зліва */
     .nav-sidebar{{
-      position:fixed;bottom:0;left:0;right:0;top:auto;
-      transform:none;flex-direction:row;
-      overflow-x:auto;-webkit-overflow-scrolling:touch;
-      background:#1e293b;padding:6px 8px;gap:4px;
-      border-top:1px solid #334155;
+      position:fixed;top:0;left:0;bottom:0;width:fit-content;
+      transform:translateX(-100%);
+      transition:transform .25s ease;
+      display:flex;flex-direction:column;
+      background:transparent;padding:56px 8px 16px;gap:6px;
+      z-index:1500;border-top:none;
+      overflow-y:auto;
     }}
-    .nav-btn{{padding:5px 12px;font-size:0.72rem;white-space:nowrap;flex-shrink:0;border-radius:4px}}
-    /* Scroll-top — вправо, вище nav bar */
-    #scroll-top{{right:12px;left:auto;bottom:54px;width:40px;height:40px;font-size:1.2rem}}
+    .nav-sidebar.open{{transform:translateX(0)}}
+    /* Overlay за drawer */
+    #nav-overlay{{
+      display:none;position:fixed;inset:0;
+      background:rgba(0,0,0,.45);z-index:1400;
+    }}
+    #nav-overlay.open{{display:block}}
+    /* Кнопка-тригер (tab Today only) */
+    #nav-toggle{{
+      display:flex;position:fixed;left:0;top:50%;transform:translateY(-50%);
+      width:26px;height:52px;background:#1e293b;color:#fff;
+      border:none;border-radius:0 8px 8px 0;
+      font-size:1rem;cursor:pointer;z-index:1300;
+      align-items:center;justify-content:center;
+      box-shadow:2px 0 8px rgba(0,0,0,.35);
+    }}
+    #nav-toggle.hidden{{display:none}}
+    .nav-btn{{display:block;padding:8px 14px;font-size:0.82rem;white-space:nowrap;border-radius:6px;width:100%;text-align:left;background:#1e293b;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:background .15s}}
+    /* Scroll-top */
+    #scroll-top{{right:12px;left:auto;bottom:20px;width:40px;height:40px;font-size:1.2rem}}
   }}
   /* sticky */
   .header{{position:sticky;top:0;z-index:500}}
@@ -2657,9 +2676,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   .tab-btn{{padding:5px 16px;border:none;border-radius:5px;cursor:pointer;font-size:0.82rem;font-weight:600;background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.75);transition:all .15s}}
   .tab-btn.active{{background:#fff;color:#1450CF}}
   /* nav sidebar (desktop) */
-  .nav-sidebar{{position:fixed;left:8px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:5px;z-index:1000}}
-  .nav-btn{{display:block;padding:7px 12px;background:#1e293b;color:#fff;border-radius:6px;font-size:0.78rem;font-weight:700;text-decoration:none;text-align:center;transition:background .15s;box-shadow:0 2px 6px rgba(0,0,0,0.25)}}
-  .nav-btn:hover{{background:#3b82f6}}
+  @media(min-width:601px){{
+    .nav-sidebar{{position:fixed;left:8px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:5px;z-index:1000;background:transparent;width:auto;padding:0}}
+    .nav-btn{{display:block;padding:7px 12px;background:#1e293b;color:#fff;border-radius:6px;font-size:0.78rem;font-weight:700;text-decoration:none;text-align:center;transition:background .15s;box-shadow:0 2px 6px rgba(0,0,0,0.25)}}
+    .nav-btn:hover{{background:#3b82f6}}
+  }}
   /* scroll top */
   #scroll-top{{position:fixed;bottom:24px;left:8px;width:44px;height:44px;border-radius:50%;background:#1e293b;color:#fff;border:none;font-size:1.4rem;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);display:none;align-items:center;justify-content:center;z-index:2000;transition:background .15s}}
   #scroll-top:hover{{background:#3b82f6}}
@@ -2730,7 +2751,9 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     <div id="avg-table-wrap"></div>
   </div>
 </div>
-<div class="nav-sidebar">
+<div id="nav-overlay"></div>
+<button id="nav-toggle" title="Навігація">&#9776;</button>
+<div class="nav-sidebar" id="nav-sidebar">
 {nav_buttons}
 </div>
 <button id="scroll-top" onclick="window.scrollTo({{top:0,behavior:'smooth'}})" title="↑">↑</button>
@@ -2976,12 +2999,42 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   if(stBtn) window.addEventListener('scroll',function(){{stBtn.classList.toggle('visible',window.scrollY>400);}});
 }})();
 
+// ── Nav drawer (mobile) ───────────────────────────────────────────
+(function(){{
+  var toggle=document.getElementById('nav-toggle');
+  var sidebar=document.getElementById('nav-sidebar');
+  var overlay=document.getElementById('nav-overlay');
+  if(!toggle||!sidebar||!overlay) return;
+  function openNav(){{sidebar.classList.add('open');overlay.classList.add('open');}}
+  function closeNav(){{sidebar.classList.remove('open');overlay.classList.remove('open');}}
+  toggle.addEventListener('click',function(){{
+    sidebar.classList.contains('open')?closeNav():openNav();
+  }});
+  overlay.addEventListener('click',closeNav);
+  sidebar.querySelectorAll('.nav-btn').forEach(function(btn){{
+    btn.addEventListener('click',closeNav);
+  }});
+}})();
+
 function switchTab(name){{
   document.getElementById('tab-today').style.display=name==='today'?'':'none';
   document.getElementById('tab-stats').style.display=name==='stats'?'':'none';
   document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.toggle('active',b.textContent.toLowerCase().includes(name==='today'?'today':'stat'));}});
-  var nav=document.querySelector('.nav-sidebar');
-  if(nav&&window.innerWidth>600)nav.style.display=name==='today'?'':'none';
+  var nav=document.getElementById('nav-sidebar');
+  var toggle=document.getElementById('nav-toggle');
+  var overlay=document.getElementById('nav-overlay');
+  if(window.innerWidth>600){{
+    if(nav) nav.style.display=name==='today'?'':'none';
+  }} else {{
+    // mobile: ховаємо drawer і toggle на Stats
+    if(name!=='today'){{
+      if(nav){{nav.classList.remove('open');}}
+      if(overlay){{overlay.classList.remove('open');}}
+      if(toggle) toggle.classList.add('hidden');
+    }} else {{
+      if(toggle) toggle.classList.remove('hidden');
+    }}
+  }}
 }}
 </script>
 </body>
