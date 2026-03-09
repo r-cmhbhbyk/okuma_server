@@ -83,7 +83,6 @@ def log(message: str):
         print(f"Failed to write log: {e}")
 
 # ── Excel Target Time ─────────────────────────────────────────────────────────
-# ── Excel Target Time ─────────────────────────────────────────────────────────
 def normalize_program_name(name: str) -> str:
     """Нормалізує назву програми для порівняння
     
@@ -212,13 +211,10 @@ def load_target_times():
     4. Якщо Excel не доступний - використовуємо кеш
     5. Якщо немає ні Excel ні кешу - повертаємо {}
     """
-    import json
-    from datetime import datetime
-    
     excel_available = False
     excel_mtime = None
     cache_mtime = None
-    
+
     # Перевіряємо доступність Excel файлу
     try:
         if os.path.exists(TARGET_TIME_FILE):
@@ -231,7 +227,7 @@ def load_target_times():
     except Exception as e:
         log(f"Cannot access Excel file: {e}")
         excel_available = False
-    
+
     # Перевіряємо наявність кешу
     cache_exists = os.path.exists(TARGET_CACHE_FILE)
     if cache_exists:
@@ -374,9 +370,6 @@ def _save_to_cache(target_times):
     Args:
         target_times: словник {(program, op, machine): time}
     """
-    import json
-    from datetime import datetime
-    
     try:
         # Конвертуємо ключі-tuple в строки для JSON
         cache_data = {
@@ -403,9 +396,6 @@ def _load_from_cache():
     Returns:
         dict: {(program, operation, machine): time} або {}
     """
-    import json
-    from datetime import datetime
-    
     try:
         with open(TARGET_CACHE_FILE, "r", encoding="utf-8") as f:
             cache_data = json.load(f)
@@ -435,92 +425,6 @@ def _load_from_cache():
         return {}
 
 
-def get_actual_cycle_time_from_mr(machine_name, program_name, mr_data):
-    """Бере фактичний час циклу з MachiningResult (RunStateTime / Counter)
-    
-    Це НАЙТОЧНІШИЙ метод - дані прямо з верстата.
-    Береться МЕДІАНА з усіх записів для програми (щоб відсіяти паузи).
-    
-    Args:
-        machine_name: повна назва машини (напр. "M1_M560R-V-e_0712-100198")
-        program_name: назва програми (напр. "WF901-907-1.MIN")
-        mr_data: список записів з machining_results.csv
-    
-    Returns:
-        float: фактичний час одного циклу в хвилинах або None
-    """
-    if not mr_data:
-        log(f"  get_actual_cycle_time_from_mr: mr_data is empty!")
-        return None
-    
-    log(f"  get_actual_cycle_time_from_mr: machine={machine_name}, program={program_name}, mr_data records={len(mr_data)}")
-    
-    # Нормалізуємо назву програми для порівняння
-    prog_base, prog_op = parse_program_name(program_name)
-    
-    # Збираємо ВСІ записи для цієї програми
-    cycle_times = []
-    
-    for mr in mr_data:
-        mr_machine = mr.get("MachineName", "")
-        mr_prog = mr.get("ProgramFileName", "")
-        
-        if mr_machine != machine_name:
-            continue
-        
-        # Порівнюємо програми
-        mr_prog_base, mr_prog_op = parse_program_name(mr_prog)
-        if mr_prog_base != prog_base or mr_prog_op != prog_op:
-            continue
-        
-        # Знайшли запис для цієї програми
-        run_time = int(mr.get("RunStateTime", 0))  # секунди
-        counter = int(mr.get("Counter", 1))
-        
-        if run_time > 0 and counter > 0:
-            cycle_time = run_time / counter / 60  # хвилини
-            cycle_times.append(cycle_time)
-            log(f"  • MR record: RunStateTime={run_time}s, Counter={counter} → {round(cycle_time, 2)} min/cycle")
-    
-    if not cycle_times:
-        log(f"  ✗ No MR records found for {machine_name} / {program_name}")
-        return None
-    
-    # Беремо МЕДІАНУ (щоб відсіяти викиди з паузами)
-    sorted_times = sorted(cycle_times)
-    n = len(sorted_times)
-    
-    if n == 1:
-        result = sorted_times[0]
-    elif n % 2 == 0:
-        result = (sorted_times[n//2 - 1] + sorted_times[n//2]) / 2
-    else:
-        result = sorted_times[n//2]
-    
-    result = round(result, 2)
-    log(f"  ✓ Median from {n} records = {result} min")
-    
-    return result
-
-
-def filter_completed_cycles(cycles_list):
-    """Фільтрує тільки 'хороші' завершені цикли для розрахунку
-
-    Відсіює:
-    - Перервані цикли (без end)
-    - Занадто короткі (<0.5 хв = 30 сек)
-    """
-    good_durations = []
-
-    for c in cycles_list:
-        duration = c.get("duration", 0)
-        if duration < 0.5:
-            continue
-        good_durations.append(duration)
-    
-    return good_durations
-
-
 def calculate_real_cycle_time(durations):
     """KDE, bandwidth=0.3. Знаходить найщільніший пік → середнє кластеру."""
     if not durations:
@@ -546,78 +450,15 @@ def calculate_real_cycle_time(durations):
     return round(sum(cluster) / len(cluster), 2) if cluster else round(sum(vals) / len(vals), 2)
 
 
-def calculate_cycle_time_smart(machine_name, program_name, cycles_list, mr_data):
+def calculate_cycle_time_smart(cycles_list):
     vals = [c["duration"] for c in cycles_list if c.get("duration", 0) > 0]
     if not vals:
         return None
     return round(sum(vals) / len(vals), 2)
 
 
-def calculate_real_cycle_time_OLD(durations):
-    """Визначає реальну довжину циклу методом медіани та щільного кластеру
-    
-    Args:
-        durations: список тривалостей циклів (хвилини)
-    
-    Returns:
-        float: реальна довжина циклу або None якщо недостатньо даних
-    """
-    if not durations or len(durations) < 3:
-        return None
-    
-    # 1. Сортуємо
-    sorted_durations = sorted(durations)
-    n = len(sorted_durations)
-    
-    # 2. Знаходимо медіану всього масиву
-    if n % 2 == 0:
-        median = (sorted_durations[n//2 - 1] + sorted_durations[n//2]) / 2
-    else:
-        median = sorted_durations[n//2]
-    
-    # 3. Вікно допуску = медіана × 0.30
-    window = median * 0.30
-    
-    # 4. Для кожного елементу рахуємо кількість сусідів
-    neighbor_counts = []
-    for i, value in enumerate(sorted_durations):
-        count = sum(1 for d in sorted_durations if value - window <= d <= value + window)
-        neighbor_counts.append((i, value, count))
-    
-    # 5. Знаходимо елемент(и) з максимальною кількістю сусідів
-    max_neighbors = max(nc[2] for nc in neighbor_counts)
-    centers = [nc for nc in neighbor_counts if nc[2] == max_neighbors]
-    
-    # Якщо кілька центрів - беремо той що ближче до середини списку
-    if len(centers) > 1:
-        middle_idx = n / 2
-        center = min(centers, key=lambda nc: abs(nc[0] - middle_idx))
-    else:
-        center = centers[0]
-    
-    center_value = center[1]
-    
-    # 6. Зібрати всі елементи в діапазоні ±вікно навколо центру
-    cluster = [d for d in sorted_durations if center_value - window <= d <= center_value + window]
-    
-    # 7. Медіана кластеру
-    cluster_sorted = sorted(cluster)
-    cluster_n = len(cluster_sorted)
-    
-    if cluster_n == 0:
-        return None
-    elif cluster_n % 2 == 0:
-        result = (cluster_sorted[cluster_n//2 - 1] + cluster_sorted[cluster_n//2]) / 2
-    else:
-        result = cluster_sorted[cluster_n//2]
-    
-    return round(result, 1)
-
+# =============================================================================
 # PART 1 — DOWNLOAD
-# =============================================================================
-
-# =============================================================================
-# PART 1 — DOWNLOAD (інтегрована функція download_both_files)
 # =============================================================================
 
 def download_both_files():
@@ -764,7 +605,6 @@ def download_both_files():
             log("✓ Continuing without machining_results.csv")
             # Створюємо порожній файл щоб скрипт не падав
             with open(MACHINING_RESULT, 'w', encoding='utf-8', newline='') as f:
-                import csv
                 writer = csv.writer(f)
                 # Пишемо тільки header без даних
                 writer.writerow(['Date', 'MachineName', 'ProgramFileName', 'RunStateTime', 'Counter'])
@@ -895,87 +735,6 @@ def load_history(conn, machine: str, days: int = 7) -> list:
     """, (machine, days))
     return list(reversed(cur.fetchall()))
 
-def get_recent_cycles(conn, machine: str, program: str, current_cycles: list, target_count: int = 20) -> list:
-    """Отримує цикли для програми: останні 3 робочі дні станку + з історії якщо потрібно
-    
-    Args:
-        conn: з'єднання з БД
-        machine: назва станку
-        program: назва програми
-        current_cycles: поточні цикли за сьогодні (список dict з duration)
-        target_count: цільова кількість циклів (за замовчуванням 20)
-    
-    Returns:
-        list: список тривалостей циклів (int)
-    """
-    from datetime import datetime
-    
-    # Збираємо тривалості з поточних циклів
-    durations = [c["duration"] for c in current_cycles]
-    
-    # Знаходимо останні 3 РОБОЧІ ДНІ СТАНКУ (дні коли станок працював, будь-які програми)
-    today = datetime.now().strftime("%Y-%m-%d")
-    cur = conn.execute("""
-        SELECT DISTINCT date 
-        FROM cycle_events 
-        WHERE machine = ? AND date != ?
-        ORDER BY date DESC 
-        LIMIT 3
-    """, (machine, today))
-    
-    last_3_working_days = [row[0] for row in cur.fetchall()]
-    
-    if not last_3_working_days:
-        # Немає робочих днів - повертаємо поточні або добираємо з історії
-        if len(durations) >= target_count:
-            return durations
-        # Добираємо з усієї історії
-        needed = target_count - len(durations)
-        cur = conn.execute("""
-            SELECT duration 
-            FROM cycle_events 
-            WHERE machine = ? AND program = ? AND date != ?
-            ORDER BY date DESC, start_time DESC
-            LIMIT ?
-        """, (machine, program, today, needed))
-        historical = [row[0] for row in cur.fetchall()]
-        return durations + historical
-    
-    # Завантажуємо цикли ЦІЄЇ ПРОГРАМИ з останніх 3 робочих днів
-    placeholders = ','.join('?' * len(last_3_working_days))
-    cur = conn.execute(f"""
-        SELECT duration 
-        FROM cycle_events 
-        WHERE machine = ? AND program = ? AND date IN ({placeholders})
-        ORDER BY date DESC, start_time DESC
-    """, (machine, program, *last_3_working_days))
-    
-    cycles_from_3_days = [row[0] for row in cur.fetchall()]
-    
-    # Об'єднуємо: поточні + з останніх 3 днів
-    all_cycles = durations + cycles_from_3_days
-    
-    # ВАЖЛИВО: Якщо за останні 3 дні >= 20 циклів - беремо ВСІ з цього періоду
-    if len(all_cycles) >= target_count:
-        return all_cycles
-    
-    # Якщо менше 20 - добираємо з історії (старіші дні)
-    used_days = [today] + last_3_working_days
-    used_days_placeholders = ','.join('?' * len(used_days))
-    
-    needed = target_count - len(all_cycles)
-    cur = conn.execute(f"""
-        SELECT duration 
-        FROM cycle_events 
-        WHERE machine = ? AND program = ? AND date NOT IN ({used_days_placeholders})
-        ORDER BY date DESC, start_time DESC
-        LIMIT ?
-    """, (machine, program, *used_days, needed))
-    
-    historical = [row[0] for row in cur.fetchall()]
-    all_cycles.extend(historical)
-    
-    return all_cycles
 
 # ── Data processing ───────────────────────────────────────────────────────────
 def load_csv() -> list[dict]:
@@ -1085,10 +844,8 @@ def apply_start_to_start_cycles(cycles_dict, counter_markers, mr_data=None):
                  тієї ж програми (start-to-start).
                  Маркери генеруються на кожному старті нового циклу.
     """
-    from collections import defaultdict as _dd
-
     # Будуємо індекс COUNTER подій з mr_data: {mname: [datetime, ...]}
-    counter_events = _dd(list)
+    counter_events = defaultdict(list)
     if mr_data:
         parse_mr = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
         for r in mr_data:
@@ -1129,7 +886,7 @@ def apply_start_to_start_cycles(cycles_dict, counter_markers, mr_data=None):
 
     for mname, cycles in cycles_dict.items():
         # Групуємо цикли по програмах
-        by_prog = _dd(list)
+        by_prog = defaultdict(list)
         for c in cycles:
             if c.get("start") and not c.get("program", "").upper().startswith("COUNTER"):
                 by_prog[c["program"]].append(c)
@@ -1204,8 +961,7 @@ def add_runstate_boundary_markers(counter_markers, rows, counter_machines):
     counter_machines — множина машин з get_counter_markers (до start-to-start розширення).
     """
     parse = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
-    from collections import defaultdict as _dd
-    machines = _dd(list)
+    machines = defaultdict(list)
     for r in rows:
         machines[r["MachineName"]].append(r)
 
@@ -1567,7 +1323,7 @@ def publish_to_github(html: str) -> bool:
         log(s.getvalue())
         return False
 
-def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
+def check_and_alert(downtimes, period_to, cycles, excel_targets):
     """Перевіряє простої та відправляє Telegram алерти
     
     Умови відправлення алерту:
@@ -1581,9 +1337,6 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
     - Target алерти відправляємо раз на добу
     - Через 24 години скидаємо список
     """
-    from datetime import datetime, timedelta
-    import json
-    
     log("── Step 3.6: Checking alerts ──")
     
     current_hour = datetime.now().hour
@@ -1680,9 +1433,14 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
     machines_with_issues = set()  # Машини з проблемами
     
     log(f"Checking cycle times for {len(cycles)} machines...")
+    excel_norm = [
+        (normalize_program_name(p), op, normalize_program_name(m), t)
+        for (p, op, m), t in excel_targets.items()
+    ]
     for mname, c_list in cycles.items():
         machine_short = mname.split("_")[0] if "_" in mname else mname
-        
+        machine_norm = normalize_program_name(machine_short)
+
         # Групуємо по програмах
         by_prog = {}
         for c in c_list:
@@ -1690,28 +1448,22 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
             if prog_name not in by_prog:
                 by_prog[prog_name] = []
             by_prog[prog_name].append(c)
-        
+
         for prog, prog_cycles in by_prog.items():
             # Розраховуємо Calculated РОЗУМНО (пріоритет: MachiningResult → фільтровані → всі)
-            calc_target = calculate_cycle_time_smart(mname, prog, prog_cycles, mr_data)
-            
+            calc_target = calculate_cycle_time_smart(prog_cycles)
+
             if calc_target is None:
                 continue
-            
+
             # Визначаємо операцію
             op_num = get_operation_number(prog)
             prog_normalized = normalize_program_name(prog)
-            
+
             # Шукаємо Excel Target
             excel_target = None
-            for (excel_prog, excel_op, excel_machine), time_val in excel_targets.items():
-                excel_prog_normalized = normalize_program_name(excel_prog)
-                excel_machine_normalized = normalize_program_name(excel_machine)
-                machine_normalized = normalize_program_name(machine_short)
-                
-                if (prog_normalized == excel_prog_normalized and 
-                    op_num == excel_op and 
-                    machine_normalized == excel_machine_normalized):
+            for ep_norm, eop, em_norm, time_val in excel_norm:
+                if prog_normalized == ep_norm and op_num == eop and machine_norm == em_norm:
                     excel_target = time_val
                     break
             
@@ -1722,12 +1474,9 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
                 log(f"    {prog}: Calculated={calc_target}, Target={excel_target}, Diff={round(diff_pct, 1)}%")
                 
                 if abs(diff_pct) > 10:
-                    # Унікальний ключ для target алертів (для логування)
-                    target_key = f"target_{mname}_{prog}"
-                    
                     log(f"    ✓ Adding target alert (difference >10%)")
                     # ЗАВЖДИ додаємо - відправляємо кожен раз незалежно від історії
-                    target_alerts.append((machine_short, prog, calc_target, excel_target, diff_pct, target_key))
+                    target_alerts.append((machine_short, prog, calc_target, excel_target, diff_pct))
                     machines_with_issues.add(machine_short)  # Додаємо до проблемних
                 else:
                     log(f"    ✗ Difference ≤10%")
@@ -1809,7 +1558,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
     # Додаємо алерти про перевищення Target
     if target_alerts:
         lines.append("\n\n⚙️ <b>Cycle Time Alerts (>10% difference):</b>")
-        for machine, prog, calc, target, diff_pct, target_key in target_alerts:
+        for machine, prog, calc, target, diff_pct in target_alerts:
             abs_diff = abs(diff_pct)
             if diff_pct > 0:
                 # Повільніше - червоний
@@ -1863,14 +1612,12 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
 def fmt_time(dt):   return dt.strftime("%H:%M") if dt else "—"
 def eff_color(pct): return "#22c55e" if pct >= 75 else ("#f59e0b" if pct >= 50 else "#ef4444")
 
-def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn, excel_targets, mr_data, counter_markers=None):
+def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn, excel_targets, counter_markers=None):
     generated  = datetime.now().strftime("%d.%m.%Y %H:%M")
     period_str = f"{fmt_time(period_from)} – {fmt_time(period_to)}"
     today_str  = datetime.now().strftime("%Y-%m-%d")
 
     # ── Stats data ──────────────────────────────────────────────────────
-    import json as _json
-    from collections import defaultdict as _dd
     # Повний список: ALL_MACHINES з конфігу + всі що є в БД + поточні дані
     _all_known_machines = set(ALL_MACHINES) | set(cycles.keys()) | set(downtimes.keys())
     try:
@@ -1881,8 +1628,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _n_known = len(_all_known_machines) if _all_known_machines else 1
 
     # Годинні дані з поточних cycles/downtimes
-    _hr_run   = _dd(lambda: _dd(float))
-    _hr_total = _dd(lambda: _dd(float))
+    _hr_run   = defaultdict(lambda: defaultdict(float))
+    _hr_total = defaultdict(lambda: defaultdict(float))
     for _mn, _cl in cycles.items():
         for _c in _cl:
             if _c.get("start") and _c.get("duration"):
@@ -1913,13 +1660,13 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         _avg_t = (_active_tot / _n_active) if _n_active else 0
         _site_denom = _avg_t * _n_known
         _today_hdata["SITE"][str(_h)] = min(100, round(_run2/_site_denom*100)) if _site_denom else 0
-    _hourly_js = _json.dumps({today_str: _today_hdata})
+    _hourly_js = json.dumps({today_str: _today_hdata})
     # Денні дані з DB
     _all_daily = {}; _mk_set = set(_all_known_machines)
     try:
         if conn:
             for _r in conn.execute("SELECT date,machine,run_min,total_min,efficiency FROM daily_summary ORDER BY date").fetchall():
-                _d2, _m2, _ru, _to, _ef = _r
+                _d2, _m2, _ru, _, _ef = _r
                 if _d2 not in _all_daily: _all_daily[_d2] = {}
                 _all_daily[_d2][_m2] = round(_ef) if _ef else 0
                 _mk_set.add(_m2)
@@ -1933,8 +1680,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         # вт-чт: 06:30–00:30 наступного дня = 18 год = 1080 хв
         # сб/нд: 0 (динамічно)
         try:
-            from datetime import date as _date
-            wd = _date.fromisoformat(date_str).weekday()
+            wd = datetime.strptime(date_str, "%Y-%m-%d").weekday()
             if wd in (0, 4): return 720
             if wd in (1, 2, 3): return 1080
         except: pass
@@ -1955,10 +1701,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _mk_list  = sorted(_mk_set) + ["SITE"]
     _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["Average"]
     _col_list = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#a855f7","#06b6d4","#f97316","#ec4899"][:len(_mk_list)]
-    _daily_js = _json.dumps(_all_daily)
-    _mk_js    = _json.dumps([str(_m) for _m in _mk_list])
-    _sk_js    = _json.dumps(_sk_list)
-    _col_js   = _json.dumps(_col_list)
+    _daily_js = json.dumps(_all_daily)
+    _mk_js    = json.dumps([str(_m) for _m in _mk_list])
+    _sk_js    = json.dumps(_sk_list)
+    _col_js   = json.dumps(_col_list)
     # ────────────────────────────────────────────────────────────────────
 
     def timeline_bar(mname):
@@ -1997,7 +1743,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                         f'stroke="#a855f7" stroke-width="1" opacity="1" pointer-events="none"/>')
 
         # ── тіки — JSON масив для JS ───────────────────────────────────
-        import json as _json
         ticks_json = []
         for i in range(0, int(total_min) + 1, 15):
             pct  = round(i / total_min * 100, 4)
@@ -2022,7 +1767,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 
         ticks_js = (
             f'<script>(function(){{'
-            f'var ticks={_json.dumps(ticks_json)};'
+            f'var ticks={json.dumps(ticks_json)};'
             f'var cv=document.getElementById("tc_{uid}");'
             f'var svg=document.getElementById("svg_{uid}");'
             f'function drawTicks(w){{'
@@ -2060,20 +1805,19 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         rows_h = load_history(conn, mname)
         if not rows_h:
             return ""
-        from datetime import datetime as _dt
         cid    = mname.replace(" ", "_").replace("-", "_")
         short  = mname.split("_")[0] if "_" in mname else mname
         labels = json.dumps([f"{r[0][8:10]}.{r[0][5:7]}" for r in rows_h])
         eff    = json.dumps([r[1] if r[1] is not None else 0 for r in rows_h])
         _day_names = {5: "SAT", 6: "SUN"}
         weekend_map = json.dumps({
-            str(i): _day_names[_dt.strptime(r[0], "%Y-%m-%d").weekday()]
+            str(i): _day_names[datetime.strptime(r[0], "%Y-%m-%d").weekday()]
             for i, r in enumerate(rows_h)
-            if _dt.strptime(r[0], "%Y-%m-%d").weekday() >= 5
+            if datetime.strptime(r[0], "%Y-%m-%d").weekday() >= 5
         })
         _week_groups: dict = {}
         for i, r in enumerate(rows_h):
-            wn = _dt.strptime(r[0], "%Y-%m-%d").isocalendar()[1]
+            wn = datetime.strptime(r[0], "%Y-%m-%d").isocalendar()[1]
             _week_groups.setdefault(wn, []).append(i)
         week_labels = json.dumps([
             {"week": wn, "indices": idxs}
@@ -2174,7 +1918,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         
         # Функція пошуку ID для циклів
         def find_cycle_ids(cycle):
-            from datetime import datetime
             c_start = cycle.get("start")
             if not c_start:
                 return ""
@@ -2403,7 +2146,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             f'}})();</script>'
         )
 
-    def cycles_section(c_list, mname, excel_targets, conn, mr_data, counter_markers=None):
+    def cycles_section(c_list, mname, excel_targets, counter_markers=None):
         """Генерує Target Cycle Time з порівнянням з Excel"""
         if not c_list:
             return ""
@@ -2416,23 +2159,28 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         
         # Витягуємо коротку назву станку (M1, M2 тощо)
         machine_short = mname.split("_")[0] if "_" in mname else mname
-        
+        machine_norm  = normalize_program_name(machine_short)
+
+        # Нормалізуємо ключі excel_targets один раз
+        excel_norm = [
+            (normalize_program_name(p), op, normalize_program_name(m), t, m)
+            for (p, op, m), t in excel_targets.items()
+        ]
+
         # Групуємо цикли по програмах (COUNTER.MIN не показуємо)
         by_prog = defaultdict(list)
         for c in c_list:
             prog_name = c["program"] or "—"
             if prog_name.upper().startswith("COUNTER"):
                 continue
-            if prog_name not in by_prog:
-                by_prog[prog_name] = []
             by_prog[prog_name].append(c)
-        
+
         # Для кожної програми використовуємо нову логіку вибірки
         target_rows = []
         for prog, current_cycles in by_prog.items():
             # Визначаємо операцію
             op_num = get_operation_number(prog)
-            
+
             # Calculated = KDE на фіолетових числах (cycle_time з кожного циклу)
             cycle_times = [c["cycle_time"] for c in current_cycles if c.get("cycle_time") and c["cycle_time"] > 0]
 
@@ -2442,36 +2190,23 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 cycle_durs = [c["duration"] for c in current_cycles if c.get("duration", 0) > 0]
                 calc_target = calculate_real_cycle_time(cycle_durs) if cycle_durs else None
 
-            
             if calc_target is None:
-                # Недостатньо даних
                 continue
-            
+
             info_text = f"{len(current_cycles)} cycles today"
-            
+
             # Шукаємо Excel Target з урахуванням станку та операції
             excel_target = None
             prog_normalized = normalize_program_name(prog)
             found_for_other_machine = None
-            
-            # Перебираємо всі ключі в excel_targets
-            for (excel_prog, excel_op, excel_machine), time_val in excel_targets.items():
-                excel_prog_normalized = normalize_program_name(excel_prog)
-                excel_machine_normalized = normalize_program_name(excel_machine)
-                machine_normalized = normalize_program_name(machine_short)
-                
-                # Порівнюємо: програма + операція + станок
-                if (prog_normalized == excel_prog_normalized and 
-                    op_num == excel_op and 
-                    machine_normalized == excel_machine_normalized):
-                    excel_target = time_val
-                    break
-                
-                # Зберігаємо якщо знайшли для іншого станку
-                if (prog_normalized == excel_prog_normalized and 
-                    op_num == excel_op and 
-                    machine_normalized != excel_machine_normalized):
-                    found_for_other_machine = excel_machine
+
+            for ep_norm, eop, em_norm, time_val, em_orig in excel_norm:
+                if prog_normalized == ep_norm and op_num == eop:
+                    if machine_norm == em_norm:
+                        excel_target = time_val
+                        break
+                    else:
+                        found_for_other_machine = em_orig
             
             # Порівняння
             if excel_target:
@@ -2529,31 +2264,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         eff        = round(total_run / total_min * 100) if total_min else 0
         short_name = mname.split("_")[0] if "_" in mname else mname
 
-        segs_for_down = timeline_data.get(mname, [])
-
-        def find_down_seg_id(d):
-            for s in segs_for_down:
-                if s["state"] == "0" and s["start"] == d["start"].strftime("%H:%M"):
-                    return s["id"]
-                if s["state"] == "0" and s["start"] <= d["start"].strftime("%H:%M") <= s["end"]:
-                    return s["id"]
-            return ""
-
-        down_rows = "".join(
-            f'<tr class="tl-row" data-id="{find_down_seg_id(d)}">'
-            f'<td>{fmt_time(d["start"])}</td>'
-            f'<td>{"…" if not d.get("end") else fmt_time(d["end"])}'
-            f'{"<span class=\"badge ongoing\">ongoing</span>" if d.get("ongoing") else ""}</td>'
-            f'<td><strong>{d["duration"]} min</strong></td><td>{d["reason"]}</td></tr>'
-            for d in d_list)
-        down_max_h = "200px" if len(d_list) > 5 else "auto"
-        down_table = (
-            f'<div class="table-scroll-x"><div class="scroll-table-wrap">'
-            f'<table class="scroll-table"><thead><tr><th>Start</th><th>End</th><th>Duration</th><th>Reason</th></tr></thead></table>'
-            f'<div class="scroll-tbody-wrap" style="max-height:{down_max_h};overflow-y:auto">'
-            f'<table class="scroll-table"><tbody>{down_rows}</tbody></table>'
-            f'</div></div></div>'
-            if d_list else '<p class="empty">No downtime detected</p>')
 
         machines_html += f"""
         <div class="machine-card" id="machine-{short_name}">
@@ -2571,7 +2281,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           <div style="padding:10px 20px 4px">{timeline_bar(mname)}</div>
           <div class="section-title">📋 Activity Log — {len(c_list)} cycles, {len(d_list)} downtimes ({total_down} min)</div>
           <div style="padding:0 0 4px">{activity_section(c_list, d_list, mname)}</div>
-          {cycles_section(c_list, mname, excel_targets, conn, mr_data, counter_markers)}
+          {cycles_section(c_list, mname, excel_targets, counter_markers)}
           {history_chart(mname)}
         </div>"""
 
@@ -2717,7 +2427,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     .stats-controls label{{font-size:0.78rem}}
     .stats-controls input[type=date]{{font-size:0.78rem;padding:4px 6px;max-width:130px}}
     .stats-controls button{{padding:5px 10px;font-size:0.75rem}}
-    .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.75rem}}
+    .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.9rem}}
     .chart-legend{{gap:6px}}
     .leg-item{{font-size:0.72rem}}
     /* Scroll-top */
@@ -2763,7 +2473,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   .chart-legend{{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}}
   .leg-item{{display:flex;align-items:center;gap:5px;font-size:0.8rem;color:#334155;font-weight:500}}
   .leg-dot{{width:11px;height:11px;border-radius:50%;display:inline-block}}
-  .stats-table{{border-collapse:collapse;font-size:0.8rem;width:100%;margin-top:16px}}
+  .stats-table{{border-collapse:collapse;font-size:0.96rem;width:100%;margin-top:16px}}
   .stats-table th{{background:#1e293b;color:#fff;padding:6px 12px;text-align:center}}
   .stats-table td{{padding:5px 12px;text-align:center;border-bottom:1px solid #e2e8f0}}
   @media(max-width:900px){{.two-charts{{grid-template-columns:1fr}}}}
@@ -3062,7 +2772,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   }}
 
   function parseLblDate(lbl){{
-    var p=lbl.split('-');return new Date(Number(p[0]),Number(p[1])-1,Number(p[2]));
+    var p=lbl.split('.');return new Date(Number(p[2]),Number(p[1])-1,Number(p[0]));
   }}
   function getISOWeek(d){{
     var tmp=new Date(d.getFullYear(),d.getMonth(),d.getDate());
@@ -3121,10 +2831,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     var from=document.getElementById('stat-from').value;
     var to=document.getElementById('stat-to').value;
     var dates=Object.keys(ALL).sort().filter(function(d){{return d>=from&&d<=to;}});
+    function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
     var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
     if(pCh)pCh.destroy();
     var ctx=document.getElementById('effChartPeriod');if(!ctx)return;
-    pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates,datasets:d2}},options:opts()}});
+    pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts()}});
     leg('legend-period',d2);
     var tb=document.getElementById('avg-table-wrap');
     if(tb&&dates.length){{
@@ -3139,7 +2850,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       // grand average across all selected machines
       var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
       var grandCol=grandAvg>=75?'#22c55e':grandAvg>=50?'#f59e0b':'#ef4444';
-      var periodStr=from+(from!==to?' – '+to:'');
+      var periodStr=fmtDate(from)+(from!==to?' – '+fmtDate(to):'');
       var hdr=sel.map(function(k){{var si=MK.indexOf(k);return '<th>'+SK[si]+'</th>';}}).join('');
       var cells=sel.map(function(k){{
         var avg=k==='SITE'?grandAvg:(mAvgs[k]||0);
@@ -3147,11 +2858,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         return '<td><b style="color:'+col+'">'+avg+'%</b></td>';
       }}).join('');
       tb.innerHTML=
-        '<div style="margin:16px 0 8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
-        '<span style="font-size:0.85rem;color:#475569;font-weight:600">Period average:</span>'+
-        '<span style="font-size:1.6rem;font-weight:700;color:'+grandCol+'">'+grandAvg+'%</span>'+
-        '<span style="font-size:0.8rem;color:#94a3b8">'+periodStr+'</span>'+
-        '</div>'+
         '<table class="stats-table"><thead><tr><th>Period</th>'+hdr+'</tr></thead>'+
         '<tbody><tr><td><b>'+periodStr+'</b></td>'+cells+'</tr></tbody></table>';
     }}
@@ -3225,8 +2931,7 @@ def main():
     log("── Step 3: Analyzing data ──")
     rows = load_csv()
     log(f"Rows loaded: {len(rows)}")
-    _found_machines = sorted(set(r["MachineName"] for r in rows if r.get("MachineName")))
-    log(f"Machines in CSV: {_found_machines}")
+    log(f"Machines in CSV: {sorted(set(r['MachineName'] for r in rows if r.get('MachineName')))}")
 
     filtered, period_from, period_to = filter_last_hours(rows, HOURS_BACK)
     date_str = period_to.strftime("%Y-%m-%d")
@@ -3267,7 +2972,7 @@ def main():
     # Step 4 — report
     log("── Step 4: Generating report ──")
     try:
-        html = generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn, excel_targets, mr_data, counter_markers)
+        html = generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn, excel_targets, counter_markers)
     except Exception as e:
         log(f"✗ Error generating HTML: {e}")
         import traceback
@@ -3287,7 +2992,7 @@ def main():
     # Step 6 — wait 3 min for GitHub Pages to deploy, then send Telegram alert
     log("── Step 6: Waiting 3 minutes before sending Telegram alert ──")
     time.sleep(180)
-    check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data)
+    check_and_alert(downtimes, period_to, cycles, excel_targets)
 
     log("=" * 60)
     log("FACTORY MONITOR COMPLETE")
