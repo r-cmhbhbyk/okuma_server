@@ -3119,9 +3119,6 @@ def main():
     log("── Step 3.5: Loading Excel target times ──")
     excel_targets = load_target_times()
 
-    # Step 3.6 — check and send alerts
-    check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data)
-
     # Step 4 — report
     log("── Step 4: Generating report ──")
     try:
@@ -3131,7 +3128,7 @@ def main():
         import traceback
         log(traceback.format_exc())
         raise
-    
+
     conn.close()
 
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
@@ -3141,7 +3138,12 @@ def main():
     # Step 5 — publish to GitHub Pages
     log("── Step 5: Publishing to GitHub Pages ──")
     publish_to_github(html)
-    
+
+    # Step 6 — wait 3 min for GitHub Pages to deploy, then send Telegram alert
+    log("── Step 6: Waiting 3 minutes before sending Telegram alert ──")
+    time.sleep(180)
+    check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data)
+
     log("=" * 60)
     log("FACTORY MONITOR COMPLETE")
     log("=" * 60)
