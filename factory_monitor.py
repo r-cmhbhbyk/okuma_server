@@ -1953,7 +1953,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             _active_eff = [v for k,v in _all_daily[_d2].items() if k != "SITE" and v > 0]
             _all_daily[_d2]["SITE"] = round(sum(_active_eff) / len(_active_eff)) if _active_eff else 0
     _mk_list  = sorted(_mk_set) + ["SITE"]
-    _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["SITE"]
+    _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["Average"]
     _col_list = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#a855f7","#06b6d4","#f97316","#ec4899"][:len(_mk_list)]
     _daily_js = _json.dumps(_all_daily)
     _mk_js    = _json.dumps([str(_m) for _m in _mk_list])
@@ -2060,10 +2060,25 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         rows_h = load_history(conn, mname)
         if not rows_h:
             return ""
+        from datetime import datetime as _dt
         cid    = mname.replace(" ", "_").replace("-", "_")
         short  = mname.split("_")[0] if "_" in mname else mname
         labels = json.dumps([f"{r[0][8:10]}.{r[0][5:7]}" for r in rows_h])
         eff    = json.dumps([r[1] if r[1] is not None else 0 for r in rows_h])
+        _day_names = {5: "SAT", 6: "SUN"}
+        weekend_map = json.dumps({
+            str(i): _day_names[_dt.strptime(r[0], "%Y-%m-%d").weekday()]
+            for i, r in enumerate(rows_h)
+            if _dt.strptime(r[0], "%Y-%m-%d").weekday() >= 5
+        })
+        _week_groups: dict = {}
+        for i, r in enumerate(rows_h):
+            wn = _dt.strptime(r[0], "%Y-%m-%d").isocalendar()[1]
+            _week_groups.setdefault(wn, []).append(i)
+        week_labels = json.dumps([
+            {"week": wn, "indices": idxs}
+            for wn, idxs in sorted(_week_groups.items())
+        ])
         return f'''
         <div class="section-title">📈 7-Day History</div>
         <div style="padding:8px 20px 16px">
@@ -2073,8 +2088,55 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         </div>
         <script>
         (function(){{
+          const weekendPlugin_{cid} = {{
+            id:"weekendBg_{cid}",
+            beforeDraw(chart){{
+              const {{ctx,chartArea,scales}} = chart;
+              if(!chartArea) return;
+              const xScale = scales.x;
+              const wMap = {weekend_map};
+              const wks  = {week_labels};
+              const n = chart.data.labels.length;
+              const step = n > 1 ? (xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) : xScale.width;
+              // weekend shading + SAT/SUN labels at top
+              Object.entries(wMap).forEach(([i, label])=>{{
+                const cx = xScale.getPixelForValue(Number(i));
+                ctx.save();
+                ctx.fillStyle = "rgba(255,180,0,0.13)";
+                ctx.fillRect(cx - step/2, chartArea.top, step, chartArea.height);
+                ctx.fillStyle = "rgba(180,100,0,0.6)";
+                ctx.font = "bold 10px sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(label, cx, chartArea.top + 11);
+                ctx.restore();
+              }});
+              // week number labels at bottom + separator lines between weeks
+              wks.forEach((g, gi)=>{{
+                const idxs = g.indices;
+                const avgX = idxs.reduce((s,i)=>s+xScale.getPixelForValue(i),0)/idxs.length;
+                ctx.save();
+                ctx.fillStyle = "rgba(80,80,180,0.75)";
+                ctx.font = "bold 10px sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText("W"+g.week, avgX, chartArea.bottom - 4);
+                // dashed separator before this week group (except first)
+                if(gi > 0){{
+                  const sepX = (xScale.getPixelForValue(idxs[0]) + xScale.getPixelForValue(wks[gi-1].indices[wks[gi-1].indices.length-1])) / 2;
+                  ctx.strokeStyle = "rgba(80,80,180,0.35)";
+                  ctx.lineWidth = 1;
+                  ctx.setLineDash([4,3]);
+                  ctx.beginPath();
+                  ctx.moveTo(sepX, chartArea.top);
+                  ctx.lineTo(sepX, chartArea.bottom);
+                  ctx.stroke();
+                }}
+                ctx.restore();
+              }});
+            }}
+          }};
           new Chart(document.getElementById("chart_{cid}").getContext("2d"),{{
             type:"line",
+            plugins:[weekendPlugin_{cid}],
             data:{{labels:{labels},datasets:[{{
               label:"{short}",
               data:{eff},
@@ -2731,7 +2793,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       <div class="chart-panel">
         <h3 class="chart-title">Today — Hourly Efficiency</h3>
         <div class="chart-wrap"><canvas id="effChartToday"></canvas></div>
-        <div class="chart-legend" id="legend-today"></div>
       </div>
       <div class="chart-panel">
         <h3 class="chart-title">Period Trend</h3>
@@ -2744,7 +2805,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           <button onclick="setRange(90)">90d</button>
         </div>
         <div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div>
-        <div class="chart-legend" id="legend-period"></div>
       </div>
     </div>
     <div id="avg-table-wrap"></div>
@@ -2959,7 +3019,18 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     var sel=getSelected();
     return MK.filter(function(k){{return sel.indexOf(k)!==-1;}}).map(function(k){{
       var i=MK.indexOf(k);
-      return {{label:SK[i],data:labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}}),
+      var data;
+      if(k==='SITE'){{
+        var selM=sel.filter(function(m){{return m!=='SITE';}});
+        data=labels.map(function(l){{
+          if(!selM.length) return 0;
+          var vals=selM.map(function(m){{var v=getFn(m,l);return v!=null?v:0;}});
+          return Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length);
+        }});
+      }}else{{
+        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}});
+      }}
+      return {{label:SK[i],data:data,
         borderColor:COLS[i],backgroundColor:COLS[i]+'22',tension:0.3,
         pointRadius:5,pointHoverRadius:7,borderWidth:k==='SITE'?4:1.5,
         borderDash:k==='SITE'?[8,4]:[],
@@ -2990,6 +3061,62 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     leg('legend-today',d2);
   }}
 
+  function parseLblDate(lbl){{
+    var p=lbl.split('-');return new Date(Number(p[0]),Number(p[1])-1,Number(p[2]));
+  }}
+  function getISOWeek(d){{
+    var tmp=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+    var dayNum=tmp.getDay()||7;tmp.setDate(tmp.getDate()+4-dayNum);
+    var y0=new Date(tmp.getFullYear(),0,1);
+    return Math.ceil((((tmp-y0)/86400000)+1)/7);
+  }}
+  var weekendPeriodPlugin={{
+    id:'weekendPeriod',
+    beforeDraw(chart){{
+      var c=chart.chartArea,xScale=chart.scales.x;
+      if(!c) return;
+      var labels=chart.data.labels,n=labels.length;if(n<2)return;
+      var step=xScale.getPixelForValue(1)-xScale.getPixelForValue(0);
+      var ctx2=chart.ctx;
+      // Weekend shading + SAT/SUN label
+      labels.forEach(function(lbl,i){{
+        var dow=parseLblDate(lbl).getDay();
+        if(dow===0||dow===6){{
+          var cx=xScale.getPixelForValue(i);
+          ctx2.save();
+          ctx2.fillStyle='rgba(255,180,0,0.13)';
+          ctx2.fillRect(cx-step/2,c.top,step,c.height);
+          ctx2.fillStyle='rgba(180,100,0,0.6)';
+          ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
+          ctx2.fillText(dow===6?'SAT':'SUN',cx,c.top+11);
+          ctx2.restore();
+        }}
+      }});
+      // Week number labels + dashed separators
+      var wg={{}};
+      labels.forEach(function(lbl,i){{
+        var wn=getISOWeek(parseLblDate(lbl));
+        if(!wg[wn])wg[wn]=[];wg[wn].push(i);
+      }});
+      var weeks=Object.entries(wg).sort(function(a,b){{return Number(a[0])-Number(b[0]);}});
+      weeks.forEach(function(entry,gi){{
+        var wn=entry[0],idxs=entry[1];
+        var avgX=idxs.reduce(function(s,i){{return s+xScale.getPixelForValue(i);}},0)/idxs.length;
+        ctx2.save();
+        ctx2.fillStyle='rgba(80,80,180,0.75)';
+        ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
+        ctx2.fillText('W'+wn,avgX,c.bottom-4);
+        if(gi>0){{
+          var prev=weeks[gi-1][1];
+          var sepX=(xScale.getPixelForValue(idxs[0])+xScale.getPixelForValue(prev[prev.length-1]))/2;
+          ctx2.strokeStyle='rgba(80,80,180,0.35)';ctx2.lineWidth=1;
+          ctx2.setLineDash([4,3]);ctx2.beginPath();
+          ctx2.moveTo(sepX,c.top);ctx2.lineTo(sepX,c.bottom);ctx2.stroke();
+        }}
+        ctx2.restore();
+      }});
+    }}
+  }};
   function updatePeriodChart(){{
     var from=document.getElementById('stat-from').value;
     var to=document.getElementById('stat-to').value;
@@ -2997,18 +3124,36 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
     if(pCh)pCh.destroy();
     var ctx=document.getElementById('effChartPeriod');if(!ctx)return;
-    pCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:dates,datasets:d2}},options:opts()}});
+    pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates,datasets:d2}},options:opts()}});
     leg('legend-period',d2);
     var tb=document.getElementById('avg-table-wrap');
     if(tb&&dates.length){{
-      var hdr=MK.map(function(k,i){{return '<th>'+SK[i]+'</th>';}}).join('');
-      var cells=MK.map(function(k,i){{
-        var vals=dates.map(function(d){{return ALL[d]&&ALL[d][k]!=null?ALL[d][k]:0;}});
-        var avg=Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length);
+      var sel=getSelected();
+      var selM=sel.filter(function(k){{return k!=='SITE';}});
+      // per-machine period averages (excluding SITE)
+      var mAvgs={{}};
+      selM.forEach(function(k){{
+        var vals=dates.map(function(dt){{return ALL[dt]&&ALL[dt][k]!=null?ALL[dt][k]:0;}});
+        mAvgs[k]=Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length);
+      }});
+      // grand average across all selected machines
+      var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
+      var grandCol=grandAvg>=75?'#22c55e':grandAvg>=50?'#f59e0b':'#ef4444';
+      var periodStr=from+(from!==to?' – '+to:'');
+      var hdr=sel.map(function(k){{var si=MK.indexOf(k);return '<th>'+SK[si]+'</th>';}}).join('');
+      var cells=sel.map(function(k){{
+        var avg=k==='SITE'?grandAvg:(mAvgs[k]||0);
         var col=avg>=75?'#22c55e':avg>=50?'#f59e0b':'#ef4444';
         return '<td><b style="color:'+col+'">'+avg+'%</b></td>';
       }}).join('');
-      tb.innerHTML='<table class="stats-table"><thead><tr><th>Avg</th>'+hdr+'</tr></thead><tbody><tr><td><b>'+from+(from!==to?' – '+to:'')+'</b></td>'+cells+'</tr></tbody></table>';
+      tb.innerHTML=
+        '<div style="margin:16px 0 8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+        '<span style="font-size:0.85rem;color:#475569;font-weight:600">Period average:</span>'+
+        '<span style="font-size:1.6rem;font-weight:700;color:'+grandCol+'">'+grandAvg+'%</span>'+
+        '<span style="font-size:0.8rem;color:#94a3b8">'+periodStr+'</span>'+
+        '</div>'+
+        '<table class="stats-table"><thead><tr><th>Period</th>'+hdr+'</tr></thead>'+
+        '<tbody><tr><td><b>'+periodStr+'</b></td>'+cells+'</tr></tbody></table>';
     }}
   }}
 
