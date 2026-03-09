@@ -1740,22 +1740,31 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
     total_machines = len(machines_checked)
     machines_with_issues_count = len(machines_with_issues)
     machines_ok_count = total_machines - machines_with_issues_count
-    
+
+    # Збираємо ВСІ поточні простої (ongoing) для включення в будь-яке повідомлення
+    all_ongoing = []
+    for mname, dd in downtimes.items():
+        short = mname.split("_")[0] if "_" in mname else mname
+        for d in dd.get("downtimes", []):
+            if not d.get("end"):  # тільки ongoing
+                all_ongoing.append((short, d))
+    all_ongoing.sort(key=lambda x: x[1]["duration"], reverse=True)
+
     # Формуємо повідомлення
-    if downtime_alerts or target_alerts:
-        # Є проблеми
+    if downtime_alerts or target_alerts or all_ongoing:
+        # Є проблеми або ongoing простої
         lines = [
             f"⚠️ <b>Factory Alert</b>  {period_to.strftime('%H:%M')}",
             f"🔗 <a href=\"{GITHUB_URL}\">Open report</a>\n"
         ]
-        
+
         # Summary
         status_parts = []
         if machines_ok_count > 0:
             status_parts.append(f"✅ {machines_ok_count} OK")
         if machines_with_issues_count > 0:
             status_parts.append(f"🔴 {machines_with_issues_count} need attention")
-        
+
         if total_machines > 0:
             lines.append(f"📊 <b>Status:</b> {' | '.join(status_parts)}")
             lines.append("")  # Порожня лінія
@@ -1766,28 +1775,34 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets, mr_data):
             f"🔗 <a href=\"{GITHUB_URL}\">Open report</a>\n",
             f"📊 All {total_machines} machines within target cycle times"
         ]
-    
-    log(f"Preparing to send: {len(downtime_alerts)} downtime alerts, {len(target_alerts)} target alerts")
-    
-    # Додаємо алерти про простої
+
+    log(f"Preparing to send: {len(downtime_alerts)} downtime alerts, {len(target_alerts)} target alerts, {len(all_ongoing)} ongoing")
+
+    # ── Поточні простої (всі ongoing) ──────────────────────────────────
+    if all_ongoing:
+        lines.append("\n⏸ <b>Current downtime:</b>")
+        for short, d in all_ongoing:
+            dur = round(d['duration'])
+            lines.append(
+                f"  🔴 <b>{short}</b>  {d['start'].strftime('%H:%M')}–ongoing"
+                f"  <b>{dur} min</b>  {d['reason']}"
+            )
+
+    # Додаємо алерти про великі простої (>= threshold) з оновленням sent_alerts
     if downtime_alerts:
+        lines.append("")
         for mname, d, alert_key, is_repeat in downtime_alerts:
             short = mname.split("_")[0]
-            end_s = d["end"].strftime("%H:%M") if d.get("end") else "ongoing"
-            
-            # Позначка: 🔴🔴 для повторних, 🔴 для нових
-            marker = "🔴🔴" if is_repeat else "🔴"
-            
-            lines.append(
-                f"\n{marker} <b>{short}</b>  {d['start'].strftime('%H:%M')}–{end_s}"
-                f"  <b>{d['duration']} min</b>\n   Reason: {d['reason']}"
-            )
-            
+
+            # Позначка: 🔴🔴 для повторних (якщо вже не в ongoing секції)
+            if is_repeat:
+                lines.append(f"  ⚠️ <b>{short}</b> repeated alert: {d['duration']} min")
+
             # Оновлюємо інформацію про алерт
             sent_alerts[alert_key] = {
                 "machine": mname,
                 "start": d['start'].strftime('%Y-%m-%d %H:%M'),
-                "duration": d['duration'],  # Поточна тривалість
+                "duration": d['duration'],
                 "last_alert": current_time.isoformat()
             }
     
@@ -2507,7 +2522,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{font-family:'Roboto','Segoe UI',Arial,sans-serif;background:#ffffff;color:#212121;font-size:15px;margin:0}}
+  body{{font-family:'Roboto','Segoe UI',Arial,sans-serif;background:#ffffff;color:#212121;font-size:15px;margin:0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}}
 
   /* ── Header ── */
   .header{{background:#1450CF;color:white;padding:10px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;box-shadow:0 2px 4px rgba(0,0,0,.2)}}
@@ -2578,7 +2593,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   .tl-svg{{display:block;border-radius:4px;user-select:none;cursor:grab}}
 
   /* ── Legend ── */
-  .legend{{display:flex;gap:14px;padding:4px 16px 10px;font-size:.78rem;flex-wrap:wrap;color:#FFFFFF}}
+  .legend{{display:flex;gap:14px;padding:4px 16px 10px;font-size:.78rem;flex-wrap:wrap;color:#212121}}
   .legend span{{display:flex;align-items:center;gap:4px}}
   .dot{{width:11px;height:11px;border-radius:2px;display:inline-block;flex-shrink:0}}
 
@@ -2711,6 +2726,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 </div>
 <div id="tab-stats" style="display:none">
   <div class="container">
+    <div id="machine-filter" style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 0 8px"></div>
     <div class="two-charts">
       <div class="chart-panel">
         <h3 class="chart-title">Today — Hourly Efficiency</h3>
@@ -2908,8 +2924,41 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   var COLS  = {_col_js};
   var tCh=null, pCh=null;
 
+  // ── Machine filter checkboxes ─────────────────────────────────────
+  (function(){{
+    var fd=document.getElementById('machine-filter');
+    if(!fd) return;
+    MK.forEach(function(k,i){{
+      var lbl=document.createElement('label');
+      lbl.style.cssText='display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.8rem;'
+        +'color:#1e293b;font-weight:600;user-select:none;padding:3px 10px 3px 6px;'
+        +'border-radius:20px;border:2px solid '+COLS[i]+';background:'+COLS[i]+'22;transition:background .15s';
+      var cb=document.createElement('input');
+      cb.type='checkbox';cb.checked=true;cb.dataset.m=k;
+      cb.style.cssText='cursor:pointer;accent-color:'+COLS[i]+';width:13px;height:13px;flex-shrink:0';
+      cb.addEventListener('change',function(){{
+        lbl.style.background=cb.checked?COLS[i]+'22':'transparent';
+        if(tCh) initToday();
+        updatePeriodChart();
+      }});
+      lbl.appendChild(cb);
+      var dot=document.createElement('span');
+      dot.style.cssText='width:9px;height:9px;border-radius:50%;background:'+COLS[i]+';display:inline-block;flex-shrink:0';
+      lbl.appendChild(dot);
+      lbl.appendChild(document.createTextNode('\u00a0'+SK[i]));
+      fd.appendChild(lbl);
+    }});
+  }})();
+
+  function getSelected(){{
+    var cbs=document.querySelectorAll('#machine-filter input[type=checkbox]');
+    var sel=[];cbs.forEach(function(cb){{if(cb.checked)sel.push(cb.dataset.m);}});
+    return sel.length?sel:MK;
+  }}
   function ds(labels,getFn){{
-    return MK.map(function(k,i){{
+    var sel=getSelected();
+    return MK.filter(function(k){{return sel.indexOf(k)!==-1;}}).map(function(k){{
+      var i=MK.indexOf(k);
       return {{label:SK[i],data:labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}}),
         borderColor:COLS[i],backgroundColor:COLS[i]+'22',tension:0.3,
         pointRadius:5,pointHoverRadius:7,borderWidth:k==='SITE'?4:1.5,
