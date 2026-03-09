@@ -23,6 +23,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 from collections import defaultdict
+from functools import lru_cache
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -83,6 +84,7 @@ def log(message: str):
         print(f"Failed to write log: {e}")
 
 # ── Excel Target Time ─────────────────────────────────────────────────────────
+@lru_cache(maxsize=512)
 def normalize_program_name(name: str) -> str:
     """Нормалізує назву програми для порівняння
     
@@ -162,44 +164,24 @@ def parse_program_name(program_name: str) -> tuple:
     operation = get_operation_number(program_name)      # 3
     return (normalized, operation)
 
+_OP_SUFFIXES = [
+    ('op5',5),('p5',5),('-p5',5),('-5',5),('_5',5),
+    ('op4',4),('p4',4),('-p4',4),('-4',4),('_4',4),
+    ('op3',3),('p3',3),('-p3',3),('-3',3),('_3',3),
+    ('op2',2),('p2',2),('-p2',2),('-2',2),('_2',2),
+    ('op1',1),('p1',1),('-p1',1),('-1',1),('_1',1),
+]
+
+@lru_cache(maxsize=512)
 def get_operation_number(program_name: str) -> int:
-    """Визначає номер операції з назви програми
-    
-    Номер операції завжди перед крапкою що йде перед розширенням файлу.
-    Наприклад: WF861-100L-P2.MIN → OP2
-               WF861-100L.MIN → OP1 (немає номера)
-               PART-OP3.PRG → OP3
-    """
+    """Визначає номер операції з назви програми (OP1–OP5)."""
     if not program_name or program_name == "—":
         return 1
-    
-    # Видаляємо розширення (все після останньої крапки)
-    if '.' in program_name:
-        base_name = program_name.rsplit('.', 1)[0]
-    else:
-        base_name = program_name
-    
-    # Переводимо в нижній регістр для перевірки
-    base_lower = base_name.lower()
-    
-    # Шукаємо op5/p5/-5 в кінці назви
-    if base_lower.endswith('op5') or base_lower.endswith('p5') or base_lower.endswith('-p5') or base_lower.endswith('-5') or base_lower.endswith('_5'):
-        return 5
-    # Шукаємо op4/p4/-4
-    elif base_lower.endswith('op4') or base_lower.endswith('p4') or base_lower.endswith('-p4') or base_lower.endswith('-4') or base_lower.endswith('_4'):
-        return 4
-    # Шукаємо op3/p3/-3
-    elif base_lower.endswith('op3') or base_lower.endswith('p3') or base_lower.endswith('-p3') or base_lower.endswith('-3') or base_lower.endswith('_3'):
-        return 3
-    # Шукаємо op2/p2/-2
-    elif base_lower.endswith('op2') or base_lower.endswith('p2') or base_lower.endswith('-p2') or base_lower.endswith('-2') or base_lower.endswith('_2'):
-        return 2
-    # Шукаємо op1/p1/-1
-    elif base_lower.endswith('op1') or base_lower.endswith('p1') or base_lower.endswith('-p1') or base_lower.endswith('-1') or base_lower.endswith('_1'):
-        return 1
-    # Якщо не знайдено жодного номера - це OP1
-    else:
-        return 1
+    base_lower = (program_name.rsplit('.', 1)[0] if '.' in program_name else program_name).lower()
+    for suffix, op in _OP_SUFFIXES:
+        if base_lower.endswith(suffix):
+            return op
+    return 1
 
 def load_target_times():
     """Завантажує Target Time з Excel файлу з кешуванням
@@ -450,12 +432,22 @@ def calculate_real_cycle_time(durations):
     return round(sum(cluster) / len(cluster), 2) if cluster else round(sum(vals) / len(vals), 2)
 
 
-def calculate_cycle_time_smart(cycles_list):
-    vals = [c["duration"] for c in cycles_list if c.get("duration", 0) > 0]
-    if not vals:
-        return None
-    return round(sum(vals) / len(vals), 2)
+# ── Shared helpers ────────────────────────────────────────────────────────────
+def _parse_ts(s: str) -> datetime:
+    """Парсить рядок дати з CSV формату "%Y.%m.%d %H:%M:%S"."""
+    return datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
 
+def _work_window_min(date_str: str) -> int:
+    """Повертає кількість робочих хвилин для дня тижня.
+    пн/пт: 07:00–19:00 = 720 хв; вт-чт: 06:30–00:30 = 1080 хв; сб/нд: 0.
+    """
+    try:
+        wd = datetime.strptime(date_str, "%Y-%m-%d").weekday()
+        if wd in (0, 4): return 720
+        if wd in (1, 2, 3): return 1080
+    except Exception:
+        pass
+    return 0
 
 # =============================================================================
 # PART 1 — DOWNLOAD
@@ -746,7 +738,6 @@ def get_counter_markers(mr_data, cycles_dict):
     потрапляють в межі циклу програми на цій машині (Counter >= 1).
     Відображаються як фіолетові лінії на таймлайні.
     """
-    parse = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
     markers = defaultdict(list)
     for mr in mr_data:
         prog = mr.get("ProgramFileName", "")
@@ -759,12 +750,10 @@ def get_counter_markers(mr_data, cycles_dict):
         if ctr < 1:
             continue
         machine = mr.get("MachineName", "")
-        date_str = mr.get("Date", "")
-        if not machine or not date_str:
+        if not machine:
             continue
-        try:
-            marker_dt = parse(date_str)
-        except ValueError:
+        marker_dt = mr.get("_ts")
+        if marker_dt is None:
             continue
         # Додаємо мітку тільки якщо вона потрапляє в межі якогось циклу цієї машини
         for c in cycles_dict.get(machine, []):
@@ -847,7 +836,6 @@ def apply_start_to_start_cycles(cycles_dict, counter_markers, mr_data=None):
     # Будуємо індекс COUNTER подій з mr_data: {mname: [datetime, ...]}
     counter_events = defaultdict(list)
     if mr_data:
-        parse_mr = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
         for r in mr_data:
             prog = r.get("ProgramFileName", "")
             if not prog.upper().startswith("COUNTER"):
@@ -859,12 +847,9 @@ def apply_start_to_start_cycles(cycles_dict, counter_markers, mr_data=None):
             if ctr < 1:
                 continue
             mname = r.get("MachineName", "")
-            date_str = r.get("Date", "")
-            if mname and date_str:
-                try:
-                    counter_events[mname].append(parse_mr(date_str))
-                except ValueError:
-                    pass
+            ts = r.get("_ts")
+            if mname and ts:
+                counter_events[mname].append(ts)
 
     def prog_has_counter(mname, prog_cycles):
         """Перевіряє чи хоча б один цикл програми мав COUNTER всередині."""
@@ -960,7 +945,6 @@ def add_runstate_boundary_markers(counter_markers, rows, counter_machines):
 
     counter_machines — множина машин з get_counter_markers (до start-to-start розширення).
     """
-    parse = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
     machines = defaultdict(list)
     for r in rows:
         machines[r["MachineName"]].append(r)
@@ -977,7 +961,7 @@ def add_runstate_boundary_markers(counter_markers, rows, counter_machines):
         for r in mrows:
             run = r["RunState"]
             if prev_run is not None and run != prev_run:
-                existing.add(parse(r["Date"]))
+                existing.add(r["_ts"])
             prev_run = run
 
         result[mname] = sorted(existing)
@@ -985,17 +969,15 @@ def add_runstate_boundary_markers(counter_markers, rows, counter_machines):
     return result
 
 def filter_last_hours(rows, hours):
-    parse   = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
-    last_ts = max(parse(r["Date"]) for r in rows)
+    last_ts = max(r["_ts"] for r in rows)
     # Для 24 годин — починаємо з 00:00 того ж дня
     if hours >= 24:
         cutoff = last_ts.replace(hour=0, minute=0, second=0, microsecond=0)
     else:
         cutoff = last_ts - timedelta(hours=hours)
-    return [r for r in rows if parse(r["Date"]) >= cutoff], cutoff, last_ts
+    return [r for r in rows if r["_ts"] >= cutoff], cutoff, last_ts
 
 def analyze_cycles(rows):
-    parse    = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
     machines = defaultdict(list)
     for r in rows:
         machines[r["MachineName"]].append(r)
@@ -1004,42 +986,46 @@ def analyze_cycles(rows):
         mrows.sort(key=lambda r: r["Date"])
         cycles, prev_run, prev_prog_parsed, cycle_start, cycle_prog = [], None, None, None, ""
         for r in mrows:
-            ts, run, prog = parse(r["Date"]), r["RunState"], r["ProgramFileName"]
+            ts, run, prog = r["_ts"], r["RunState"], r["ProgramFileName"]
             prog_parsed = parse_program_name(prog)  # (base, operation)
-            
-            # Фіксуємо старт циклу коли:
-            # 1. RunState змінився з 0→1 АБО
-            # 2. Програма змінилась при RunState=1
+
             if run == "1":
                 if prev_run in (None, "0"):
-                    # Старт нового циклу
                     cycle_start, cycle_prog = ts, prog
                 elif prev_run == "1" and prog_parsed != prev_prog_parsed and cycle_start:
-                    # Програма змінилась - закриваємо попередній цикл
                     cycles.append({"start": cycle_start, "end": ts, "program": cycle_prog,
                                     "duration": round((ts - cycle_start).total_seconds() / 60, 2)})
-                    # Стартуємо новий цикл з новою програмою
                     cycle_start, cycle_prog = ts, prog
-            
-            # Фіксуємо кінець циклу коли RunState змінився з 1→0
             elif prev_run == "1" and run == "0" and cycle_start:
                 cycles.append({"start": cycle_start, "end": ts, "program": cycle_prog,
                                 "duration": round((ts - cycle_start).total_seconds() / 60, 2)})
                 cycle_start = None
-            
+
             prev_run = run
             prev_prog_parsed = prog_parsed
-            
+
         if cycle_start:
-            last_ts = parse(mrows[-1]["Date"])
+            last_ts = mrows[-1]["_ts"]
             cycles.append({"start": cycle_start, "end": None, "program": cycle_prog,
                            "duration": round((last_ts - cycle_start).total_seconds() / 60, 2),
                            "ongoing": True})
         result[mname] = cycles
     return result
 
+def _is_in_efficiency_window(ts, weekend_first, weekend_last):
+    """Перевіряє чи timestamp потрапляє в робоче вікно дня тижня."""
+    wd   = ts.weekday()
+    hour = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
+    if wd in (0, 4):   return 7.0 <= hour < 19.0          # Пн, Пт
+    if wd in (1, 2, 3): return 6.5 <= hour <= 24.0        # Вт-Чт
+    if wd in (2, 3, 4): return 0.0 <= hour < 0.5          # ніч після Вт-Чт
+    if wd in (5, 6):                                       # Сб, Нд
+        if weekend_first is None or weekend_last is None:
+            return False
+        return weekend_first <= ts <= weekend_last
+    return False
+
 def analyze_downtime(rows):
-    parse    = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
     machines = defaultdict(list)
     for r in rows:
         machines[r["MachineName"]].append(r)
@@ -1047,46 +1033,23 @@ def analyze_downtime(rows):
     for mname, mrows in machines.items():
         mrows.sort(key=lambda r: r["Date"])
         downtimes, prev_run, dt_start, dt_reason = [], None, None, ""
-        
-        # Визначаємо межі робочого часу залежно від дня тижня
-        # weekday: 0=Пн, 1=Вт, 2=Ср, 3=Чт, 4=Пт, 5=Сб, 6=Нд
-        def is_in_efficiency_window(ts, weekend_first, weekend_last):
-            wd = ts.weekday()
-            hour = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
 
-            if wd in (0, 4):  # Пн, Пт: 07:00–19:00
-                return 7.0 <= hour < 19.0
-
-            elif wd in (1, 2, 3):  # Вт, Ср, Чт: 06:30–(кінець дня) — перша частина зміни
-                return 6.5 <= hour <= 24.0
-
-            elif wd in (2, 3, 4):  # Ср, Чт, Пт: 00:00–00:30 — друга частина зміни (ніч після вт/ср/чт)
-                return 0.0 <= hour < 0.5
-
-            elif wd in (5, 6):  # Сб, Нд: перший–останній цикл
-                if weekend_first is None or weekend_last is None:
-                    return False
-                return weekend_first <= ts <= weekend_last
-
-            return False
-        
         # Знаходимо межі вихідного дня (перший/останній запис RunState=1)
-        weekend_first = None
-        weekend_last = None
+        weekend_first = weekend_last = None
         for r in mrows:
-            ts = parse(r["Date"])
+            ts = r["_ts"]
             if ts.weekday() in (5, 6) and r["RunState"] == "1":
                 if weekend_first is None:
                     weekend_first = ts
                 weekend_last = ts
-        
+
         filtered_rows = [
             r for r in mrows
-            if is_in_efficiency_window(parse(r["Date"]), weekend_first, weekend_last)
+            if _is_in_efficiency_window(r["_ts"], weekend_first, weekend_last)
         ]
-        
+
         for r in mrows:
-            ts, run = parse(r["Date"]), r["RunState"]
+            ts, run = r["_ts"], r["RunState"]
             if run == "0":
                 if   r["AlarmState"]       == "1": reason = "Alarm: " + (r["AlarmMessage"] or r["AlarmNo"] or "—")
                 elif r["PowerOn"]          == "0": reason = "Power off"
@@ -1109,13 +1072,12 @@ def analyze_downtime(rows):
                 dt_start = None
             prev_run = run
         if dt_start:
-            last_ts = parse(mrows[-1]["Date"])
+            last_ts = mrows[-1]["_ts"]
             dur = round((last_ts - dt_start).total_seconds() / 60, 2)
             if dur > 0:
                 downtimes.append({"start": dt_start, "end": None, "duration": dur,
                                   "reason": dt_reason, "ongoing": True})
-        
-        # Рахуємо ефективність БЕЗ нічного періоду
+
         result[mname] = {
             "downtimes":  downtimes,
             "total_run":  sum(1 for r in filtered_rows if r["RunState"] == "1"),
@@ -1189,7 +1151,6 @@ def split_timeline_by_counter(timeline_data, counter_markers, period_from, perio
 
 
 def build_timeline_data(rows, period_from, period_to):
-    parse     = lambda s: datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
     machines  = defaultdict(list)
     for r in rows:
         machines[r["MachineName"]].append(r)
@@ -1221,7 +1182,7 @@ def build_timeline_data(rows, period_from, period_to):
         for r in mrows:
             if r["ProgramFileName"].upper().startswith("COUNTER"):
                 continue  # службовий рядок — не розриваємо сегмент
-            ts, run = parse(r["Date"]), r["RunState"]
+            ts, run = r["_ts"], r["RunState"]
             lbl = _get_label(r)
             if seg_state is None:
                 seg_state, seg_start, seg_label = run, ts, lbl
@@ -1451,7 +1412,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
 
         for prog, prog_cycles in by_prog.items():
             # Розраховуємо Calculated РОЗУМНО (пріоритет: MachiningResult → фільтровані → всі)
-            calc_target = calculate_cycle_time_smart(prog_cycles)
+            calc_target = calculate_real_cycle_time(prog_cycles)
 
             if calc_target is None:
                 continue
@@ -1674,17 +1635,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 _all_daily[_d2]["__s__"]["r"] += _ru or 0
     except: pass
     _n_machines = len(_mk_set)
-    def _work_window_min(date_str):
-        # Повертає кількість робочих хвилин для дня тижня
-        # пн/пт: 07:00–19:00 = 720 хв
-        # вт-чт: 06:30–00:30 наступного дня = 18 год = 1080 хв
-        # сб/нд: 0 (динамічно)
-        try:
-            wd = datetime.strptime(date_str, "%Y-%m-%d").weekday()
-            if wd in (0, 4): return 720
-            if wd in (1, 2, 3): return 1080
-        except: pass
-        return 0
     for _d2 in _all_daily:
         for _m2 in _mk_set:
             if _m2 not in _all_daily[_d2]:
@@ -2146,14 +2096,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             f'}})();</script>'
         )
 
-    def cycles_section(c_list, mname, excel_targets, counter_markers=None):
+    def cycles_section(c_list, mname, excel_targets):
         """Генерує Target Cycle Time з порівнянням з Excel"""
         if not c_list:
             return ""
 
-        # green_durs для цієї машини: {datetime: float}
-        green_durs = (counter_markers or {}).get(f"__green_{mname}", {})
-        
         # DEBUG: Логуємо скільки targets завантажено
         log(f"cycles_section: machine={mname}, excel_targets count={len(excel_targets)}")
         
@@ -2281,7 +2228,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           <div style="padding:10px 20px 4px">{timeline_bar(mname)}</div>
           <div class="section-title">📋 Activity Log — {len(c_list)} cycles, {len(d_list)} downtimes ({total_down} min)</div>
           <div style="padding:0 0 4px">{activity_section(c_list, d_list, mname)}</div>
-          {cycles_section(c_list, mname, excel_targets, counter_markers)}
+          {cycles_section(c_list, mname, excel_targets)}
           {history_chart(mname)}
         </div>"""
 
@@ -2930,6 +2877,8 @@ def main():
     # Step 3 — analyze
     log("── Step 3: Analyzing data ──")
     rows = load_csv()
+    for r in rows:
+        r["_ts"] = _parse_ts(r["Date"])
     log(f"Rows loaded: {len(rows)}")
     log(f"Machines in CSV: {sorted(set(r['MachineName'] for r in rows if r.get('MachineName')))}")
 
@@ -2944,6 +2893,11 @@ def main():
     if os.path.exists(MACHINING_RESULT):
         with open(MACHINING_RESULT, encoding="utf-8") as f:
             mr_data = list(csv.DictReader(f))
+        for r in mr_data:
+            try:
+                r["_ts"] = _parse_ts(r["Date"])
+            except (ValueError, KeyError):
+                r["_ts"] = None
         log(f"Loaded {len(mr_data)} records from MachiningResult")
     else:
         log("MachiningResult file not found, mr_data is empty")
