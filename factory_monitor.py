@@ -14,6 +14,7 @@ Factory Machine Monitor
 """
 
 import os
+import html as _html
 import time
 import sqlite3
 import csv
@@ -31,7 +32,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, StaleElementReferenceException
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOWNLOAD_DIR        = r"C:\Connectplan_raports"
@@ -508,9 +509,19 @@ def download_both_files():
         
         # Крок 4: Тиснемо Download (operation_history)
         log("── Step 4: Downloading operation_history.csv ──")
-        btn = wait.until(EC.element_to_be_clickable((By.ID, "btn_Download")))
-        click_time_1 = time.time()
-        btn.click()
+        click_time_1 = None
+        for _attempt in range(3):
+            try:
+                btn = wait.until(EC.element_to_be_clickable((By.ID, "btn_Download")))
+                click_time_1 = time.time()
+                btn.click()
+                break
+            except StaleElementReferenceException:
+                log(f"  Stale element on attempt {_attempt+1}, retrying...")
+                time.sleep(0.5)
+        if click_time_1 is None:
+            log("✗ Could not click download button after 3 attempts")
+            return False
         log("✓ Download button clicked — waiting for first file...")
         
         # Чекаємо перший файл (прискорено: перевірка кожні 0.5 сек)
@@ -1316,13 +1327,14 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     # Завантажуємо список відправлених алертів
     sent_alerts = {}
     reset_needed = False
-    
+    last_reset_str = current_time.isoformat()
+
     if os.path.exists(sent_alerts_file):
         try:
             with open(sent_alerts_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 last_reset = data.get("last_reset", "")
-                
+
                 if last_reset:
                     last_reset_dt = datetime.fromisoformat(last_reset)
                     hours_since_reset = (current_time - last_reset_dt).total_seconds() / 3600
@@ -1330,6 +1342,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                         reset_needed = True
                     else:
                         sent_alerts = data.get("alerts", {})
+                        last_reset_str = last_reset  # зберігаємо оригінальний час скидання
                 else:
                     reset_needed = True
         except:
@@ -1390,17 +1403,23 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     
     # Збираємо алерти про перевищення Target >10%
     target_alerts = []
+    no_norm_alerts = []  # Програми без норми в Excel
     machines_checked = set()  # Унікальні машини які перевірялись
     machines_with_issues = set()  # Машини з проблемами
+    machines_no_norm = set()  # Машини де є цикли але нема норми
     
     log(f"Checking cycle times for {len(cycles)} machines...")
     excel_norm = [
         (normalize_program_name(p), op, normalize_program_name(m), t)
         for (p, op, m), t in excel_targets.items()
     ]
+    # DEBUG: показуємо зразок машин з Excel
+    unique_machines_excel = sorted(set(em for _, _, em, _ in excel_norm))
+    log(f"  Excel machine norms (sample): {unique_machines_excel[:10]}")
     for mname, c_list in cycles.items():
         machine_short = mname.split("_")[0] if "_" in mname else mname
         machine_norm = normalize_program_name(machine_short)
+        log(f"  Machine: {machine_short} → norm={machine_norm}")
 
         # Групуємо по програмах
         by_prog = {}
@@ -1411,8 +1430,13 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
             by_prog[prog_name].append(c)
 
         for prog, prog_cycles in by_prog.items():
-            # Розраховуємо Calculated РОЗУМНО (пріоритет: MachiningResult → фільтровані → всі)
-            calc_target = calculate_real_cycle_time(prog_cycles)
+            # Розраховуємо Calculated — спочатку cycle_time, потім duration
+            cycle_times = [c["cycle_time"] for c in prog_cycles if c.get("cycle_time") and c["cycle_time"] > 0]
+            if cycle_times:
+                calc_target = calculate_real_cycle_time(cycle_times)
+            else:
+                cycle_durs = [c["duration"] for c in prog_cycles if c.get("duration", 0) > 0]
+                calc_target = calculate_real_cycle_time(cycle_durs) if cycle_durs else None
 
             if calc_target is None:
                 continue
@@ -1423,17 +1447,22 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
 
             # Шукаємо Excel Target
             excel_target = None
+            prog_hits = [(ep, eop, em, t) for ep, eop, em, t in excel_norm if ep == prog_normalized]
+            if not prog_hits:
+                log(f"    {prog} (norm={prog_normalized}, machine={machine_norm}, op={op_num}): No prog match in Excel")
+            else:
+                log(f"    {prog} (norm={prog_normalized}, machine={machine_norm}, op={op_num}): {len(prog_hits)} prog matches, machines={[x[2] for x in prog_hits[:5]]}")
             for ep_norm, eop, em_norm, time_val in excel_norm:
                 if prog_normalized == ep_norm and op_num == eop and machine_norm == em_norm:
                     excel_target = time_val
                     break
-            
+
             # Якщо є Target
             if excel_target:
                 machines_checked.add(machine_short)  # Додаємо до перевірених
                 diff_pct = ((calc_target - excel_target) / excel_target) * 100
                 log(f"    {prog}: Calculated={calc_target}, Target={excel_target}, Diff={round(diff_pct, 1)}%")
-                
+
                 if abs(diff_pct) > 10:
                     log(f"    ✓ Adding target alert (difference >10%)")
                     # ЗАВЖДИ додаємо - відправляємо кожен раз незалежно від історії
@@ -1443,13 +1472,16 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                     log(f"    ✗ Difference ≤10%")
             else:
                 log(f"    {prog}: No target found in Excel")
+                no_norm_alerts.append((machine_short, prog, calc_target))
+                machines_no_norm.add(machine_short)
     
-    log(f"Found {len(target_alerts)} target alerts")
-    
+    log(f"Found {len(target_alerts)} target alerts, {len(no_norm_alerts)} no-norm alerts")
+
     # Підраховуємо статистику
-    total_machines = len(machines_checked)
+    total_machines = len(machines_checked | machines_no_norm)
     machines_with_issues_count = len(machines_with_issues)
-    machines_ok_count = total_machines - machines_with_issues_count
+    machines_no_norm_count = len(machines_no_norm - machines_with_issues)
+    machines_ok_count = total_machines - machines_with_issues_count - machines_no_norm_count
 
     # Збираємо ВСІ поточні простої (ongoing) для включення в будь-яке повідомлення
     all_ongoing = []
@@ -1461,7 +1493,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     all_ongoing.sort(key=lambda x: x[1]["duration"], reverse=True)
 
     # Формуємо повідомлення
-    if downtime_alerts or target_alerts or all_ongoing:
+    if downtime_alerts or target_alerts or no_norm_alerts or all_ongoing:
         # Є проблеми або ongoing простої
         lines = [
             f"⚠️ <b>Factory Alert</b>  {period_to.strftime('%H:%M')}",
@@ -1473,7 +1505,9 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
         if machines_ok_count > 0:
             status_parts.append(f"✅ {machines_ok_count} OK")
         if machines_with_issues_count > 0:
-            status_parts.append(f"🔴 {machines_with_issues_count} need attention")
+            status_parts.append(f"🔴 {machines_with_issues_count} off target")
+        if machines_no_norm_count > 0:
+            status_parts.append(f"❓ {machines_no_norm_count} no norm")
 
         if total_machines > 0:
             lines.append(f"📊 <b>Status:</b> {' | '.join(status_parts)}")
@@ -1486,7 +1520,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
             f"📊 All {total_machines} machines within target cycle times"
         ]
 
-    log(f"Preparing to send: {len(downtime_alerts)} downtime alerts, {len(target_alerts)} target alerts, {len(all_ongoing)} ongoing")
+    log(f"Preparing to send: {len(downtime_alerts)} downtime alerts, {len(target_alerts)} target alerts, {len(no_norm_alerts)} no-norm alerts, {len(all_ongoing)} ongoing")
 
     # ── Поточні простої (всі ongoing) ──────────────────────────────────
     if all_ongoing:
@@ -1495,7 +1529,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
             dur = round(d['duration'])
             lines.append(
                 f"  🔴 <b>{short}</b>  {d['start'].strftime('%H:%M')}–ongoing"
-                f"  <b>{dur} min</b>  {d['reason']}"
+                f"  <b>{dur} min</b>  {_html.escape(d['reason'])}"
             )
 
     # Додаємо алерти про великі простої (>= threshold) з оновленням sent_alerts
@@ -1534,10 +1568,19 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                 f"\n   {status}"
             )
             # НЕ зберігаємо target алерти - відправляємо завжди
-    
+
+    # Додаємо алерти про відсутність норми
+    if no_norm_alerts:
+        lines.append("\n\n❓ <b>No norm in Excel:</b>")
+        for machine, prog, calc in no_norm_alerts:
+            lines.append(
+                f"\n📋 <b>{machine}</b> - {prog}"
+                f"\n   Cycle: {calc} min | Norm: missing"
+            )
+
     # Перевіряємо чи треба відправляти "All OK" повідомлення
     should_send = True
-    if not downtime_alerts and not target_alerts:
+    if not downtime_alerts and not target_alerts and not no_norm_alerts and not all_ongoing:
         # Все ОК - перевіряємо коли востаннє відправляли таке повідомлення
         last_ok_alert = sent_alerts.get("_last_all_ok_alert")
         
@@ -1565,7 +1608,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     # Зберігаємо оновлений список
     with open(sent_alerts_file, "w", encoding="utf-8") as f:
         json.dump({
-            "last_reset": current_time.isoformat(),
+            "last_reset": last_reset_str,
             "alerts": sent_alerts
         }, f, indent=2)
 
@@ -2944,8 +2987,8 @@ def main():
     publish_to_github(html)
 
     # Step 6 — wait 3 min for GitHub Pages to deploy, then send Telegram alert
-    log("── Step 6: Waiting 3 minutes before sending Telegram alert ──")
-    time.sleep(180)
+    log("── Step 6: Waiting 1 minute before sending Telegram alert ──")
+    time.sleep(60)
     check_and_alert(downtimes, period_to, cycles, excel_targets)
 
     log("=" * 60)
