@@ -438,6 +438,19 @@ def _parse_ts(s: str) -> datetime:
     """Парсить рядок дати з CSV формату "%Y.%m.%d %H:%M:%S"."""
     return datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
 
+def _canonical_machine(name: str) -> str:
+    """Повертає канонічну назву станку за першими двома символами.
+    Приклад: "M1_..." → "M1_M560R-V-e_0712-100198" (з ALL_MACHINES).
+    Якщо не знайдено в ALL_MACHINES — повертає оригінал.
+    """
+    if not name:
+        return name
+    prefix = name[:2].upper()
+    for canonical in ALL_MACHINES:
+        if canonical[:2].upper() == prefix:
+            return canonical
+    return name
+
 def _work_window_min(date_str: str) -> int:
     """Повертає кількість робочих хвилин для дня тижня.
     пн/пт: 07:00–19:00 = 720 хв; вт-чт: 06:30–00:30 = 1080 хв; сб/нд: 0.
@@ -1027,9 +1040,9 @@ def _is_in_efficiency_window(ts, weekend_first, weekend_last):
     """Перевіряє чи timestamp потрапляє в робоче вікно дня тижня."""
     wd   = ts.weekday()
     hour = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
-    if wd in (0, 4):   return 7.0 <= hour < 19.0          # Пн, Пт
-    if wd in (1, 2, 3): return 6.5 <= hour <= 24.0        # Вт-Чт
-    if wd in (2, 3, 4): return 0.0 <= hour < 0.5          # ніч після Вт-Чт
+    if wd in (2, 3, 4) and hour < 0.5: return True        # ніч 00:00–00:30 після Вт/Ср/Чт
+    if wd in (0, 4):    return 7.0 <= hour < 19.0         # Пн, Пт: 07:00–19:00
+    if wd in (1, 2, 3): return hour >= 6.5                # Вт-Чт: 06:30–00:00
     if wd in (5, 6):                                       # Сб, Нд
         if weekend_first is None or weekend_last is None:
             return False
@@ -1627,7 +1640,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     try:
         if conn:
             for _r in conn.execute("SELECT DISTINCT machine FROM daily_summary").fetchall():
-                _all_known_machines.add(_r[0])
+                _all_known_machines.add(_canonical_machine(_r[0]))
     except: pass
     _n_known = len(_all_known_machines) if _all_known_machines else 1
 
@@ -1670,18 +1683,20 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     try:
         if conn:
             for _r in conn.execute("SELECT date,machine,run_min,total_min,efficiency FROM daily_summary ORDER BY date").fetchall():
-                _d2, _m2, _ru, _, _ef = _r
+                _d2, _m2_raw, _ru, _tm, _ef = _r
+                _m2 = _canonical_machine(_m2_raw)
                 if _d2 not in _all_daily: _all_daily[_d2] = {}
-                _all_daily[_d2][_m2] = round(_ef) if _ef else 0
+                if _tm:
+                    _all_daily[_d2][_m2] = round(_ef) if _ef else 0
+                    _all_daily[_d2].setdefault("__s__",{"r":0})
+                    _all_daily[_d2]["__s__"]["r"] += _ru or 0
                 _mk_set.add(_m2)
-                _all_daily[_d2].setdefault("__s__",{"r":0})
-                _all_daily[_d2]["__s__"]["r"] += _ru or 0
     except: pass
     _n_machines = len(_mk_set)
     for _d2 in _all_daily:
         for _m2 in _mk_set:
             if _m2 not in _all_daily[_d2]:
-                _all_daily[_d2][_m2] = 0
+                _all_daily[_d2][_m2] = None
         _sd = _all_daily[_d2].pop("__s__",{})
         _ww = _work_window_min(_d2)
         if _ww > 0:
@@ -1689,7 +1704,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             _all_daily[_d2]["SITE"] = min(100, round(_sd.get("r",0) / _site_t * 100))
         else:
             # сб/нд: тільки активні станки (робота у вихідні — бонус)
-            _active_eff = [v for k,v in _all_daily[_d2].items() if k != "SITE" and v > 0]
+            _active_eff = [v for k,v in _all_daily[_d2].items() if k != "SITE" and v is not None and v > 0]
             _all_daily[_d2]["SITE"] = round(sum(_active_eff) / len(_active_eff)) if _active_eff else 0
     _mk_list  = sorted(_mk_set) + ["SITE"]
     _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["Average"]
@@ -2493,6 +2508,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       <div class="chart-panel">
         <h3 class="chart-title">Today — Hourly Efficiency</h3>
         <div class="chart-wrap"><canvas id="effChartToday"></canvas></div>
+        <div id="today-table-wrap"></div>
       </div>
       <div class="chart-panel">
         <h3 class="chart-title">Period Trend</h3>
@@ -2503,6 +2519,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           <button onclick="setRange(7)">7d</button>
           <button onclick="setRange(30)">30d</button>
           <button onclick="setRange(90)">90d</button>
+          <button onclick="setRange(180)">180d</button>
+          <button onclick="setRange(365)">1y</button>
         </div>
         <div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div>
       </div>
@@ -2759,6 +2777,27 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:opts()}});
     requestAnimationFrame(function(){{tCh.resize();}});
     leg('legend-today',d2);
+    var ttb=document.getElementById('today-table-wrap');
+    if(ttb){{
+      var sel=getSelected();
+      var selM=sel.filter(function(k){{return k!=='SITE';}});
+      var mAvgs={{}};
+      selM.forEach(function(k){{
+        var vals=hours.map(function(h){{return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:null;}}).filter(function(v){{return v!==null;}});
+        mAvgs[k]=vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):0;
+      }});
+      var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
+      var todStr=tod.slice(8,10)+'.'+tod.slice(5,7)+'.'+tod.slice(0,4);
+      var hdr=sel.map(function(k){{var si=MK.indexOf(k);return '<th>'+SK[si]+'</th>';}}).join('');
+      var cells=sel.map(function(k){{
+        var avg=k==='SITE'?grandAvg:(mAvgs[k]||0);
+        var col=avg>=75?'#22c55e':avg>=50?'#f59e0b':'#ef4444';
+        return '<td><b style="color:'+col+'">'+avg+'%</b></td>';
+      }}).join('');
+      ttb.innerHTML=
+        '<table class="stats-table"><thead><tr><th>Date</th>'+hdr+'</tr></thead>'+
+        '<tbody><tr><td><b>'+todStr+'</b></td>'+cells+'</tr></tbody></table>';
+    }}
   }}
 
   function parseLblDate(lbl){{
@@ -2834,8 +2873,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       // per-machine period averages (excluding SITE)
       var mAvgs={{}};
       selM.forEach(function(k){{
-        var vals=dates.map(function(dt){{return ALL[dt]&&ALL[dt][k]!=null?ALL[dt][k]:0;}});
-        mAvgs[k]=Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length);
+        var vals=dates.map(function(dt){{return (ALL[dt]&&ALL[dt][k]!=null)?ALL[dt][k]:null;}}).filter(function(v){{return v!==null;}});
+        mAvgs[k]=vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):0;
       }});
       // grand average across all selected machines
       var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
@@ -2890,6 +2929,7 @@ function switchTab(name){{
   var t2=document.getElementById('tbtn-stats');
   if(t1) t1.classList.toggle('active',name==='today');
   if(t2) t2.classList.toggle('active',name==='stats');
+  try{{localStorage.setItem('activeTab',name);}}catch(e){{}}
   if(name==='stats'){{
     setTimeout(function(){{requestAnimationFrame(function(){{
       if(window.initToday) window.initToday();
@@ -2902,6 +2942,10 @@ function switchTab(name){{
   if(nav) nav.classList.remove('open');
   if(overlay) overlay.classList.remove('open');
 }}
+document.addEventListener('DOMContentLoaded',function(){{
+  var saved;try{{saved=localStorage.getItem('activeTab');}}catch(e){{}}
+  if(saved&&saved!=='today') switchTab(saved);
+}});
 </script>
 </body>
 </html>"""
@@ -2922,6 +2966,7 @@ def main():
     rows = load_csv()
     for r in rows:
         r["_ts"] = _parse_ts(r["Date"])
+        r["MachineName"] = _canonical_machine(r.get("MachineName", ""))
     log(f"Rows loaded: {len(rows)}")
     log(f"Machines in CSV: {sorted(set(r['MachineName'] for r in rows if r.get('MachineName')))}")
 
@@ -2941,6 +2986,7 @@ def main():
                 r["_ts"] = _parse_ts(r["Date"])
             except (ValueError, KeyError):
                 r["_ts"] = None
+            r["MachineName"] = _canonical_machine(r.get("MachineName", ""))
         log(f"Loaded {len(mr_data)} records from MachiningResult")
     else:
         log("MachiningResult file not found, mr_data is empty")
