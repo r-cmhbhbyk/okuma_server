@@ -1678,6 +1678,14 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         _site_denom = _avg_t * _n_known
         _today_hdata["SITE"][str(_h)] = min(100, round(_run2/_site_denom*100)) if _site_denom else 0
     _hourly_js = json.dumps({today_str: _today_hdata})
+    # Ефективність за робочі години (filtered) для плашки під графіком
+    _today_eff = {}
+    for _mn in _all_known_machines:
+        _dd = downtimes.get(_mn, {})
+        _r = _dd.get("total_run", 0)
+        _t = _dd.get("total_min", 0)
+        _today_eff[_mn] = round(_r / _t * 100) if _t else 0
+    _today_eff_js = json.dumps(_today_eff)
     # Денні дані з DB
     _all_daily = {}; _mk_set = set(_all_known_machines)
     try:
@@ -2697,6 +2705,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 (function(){{
   var ALL   = {_daily_js};
   var HDATA = {_hourly_js};
+  var TEFF  = {_today_eff_js};
   var MK    = {_mk_js};
   var SK    = {_sk_js};
   var COLS  = {_col_js};
@@ -2783,8 +2792,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       var selM=sel.filter(function(k){{return k!=='SITE';}});
       var mAvgs={{}};
       selM.forEach(function(k){{
-        var vals=hours.map(function(h){{return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:null;}}).filter(function(v){{return v!==null;}});
-        mAvgs[k]=vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):0;
+        mAvgs[k]=(TEFF&&TEFF[k]!=null)?TEFF[k]:0;
       }});
       var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
       var todStr=tod.slice(8,10)+'.'+tod.slice(5,7)+'.'+tod.slice(0,4);
