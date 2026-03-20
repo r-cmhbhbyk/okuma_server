@@ -1647,17 +1647,29 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     # Годинні дані з поточних cycles/downtimes
     _hr_run   = defaultdict(lambda: defaultdict(float))
     _hr_total = defaultdict(lambda: defaultdict(float))
+
+    def _spread_hours(run_d, total_d, mname, start_dt, end_dt, is_run):
+        """Розподіляє тривалість події по всіх годинах що вона охоплює."""
+        cur = start_dt
+        while cur < end_dt:
+            h = cur.hour
+            hr_end = cur.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            seg_min = (min(end_dt, hr_end) - cur).total_seconds() / 60
+            if is_run:
+                run_d[mname][h] += seg_min
+            total_d[mname][h] += seg_min
+            cur = hr_end
+
     for _mn, _cl in cycles.items():
         for _c in _cl:
             if _c.get("start") and _c.get("duration"):
-                _h = _c["start"].hour
-                _hr_run[_mn][_h]   += _c["duration"]
-                _hr_total[_mn][_h] += _c["duration"]
+                _c_end = _c.get("end") or (_c["start"] + timedelta(minutes=_c["duration"]))
+                _spread_hours(_hr_run, _hr_total, _mn, _c["start"], _c_end, True)
     for _mn, _dd2 in downtimes.items():
         for _d in _dd2.get("downtimes", []):
             if _d.get("start") and _d.get("duration"):
-                _h = _d["start"].hour
-                _hr_total[_mn][_h] += _d["duration"]
+                _d_end = _d.get("end") or (_d["start"] + timedelta(minutes=_d["duration"]))
+                _spread_hours(_hr_run, _hr_total, _mn, _d["start"], _d_end, False)
     _all_h = set()
     for _m in _hr_total: _all_h |= set(_hr_total[_m].keys())
     _today_hdata = {}
