@@ -1727,7 +1727,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             _active_eff = [v for k,v in _all_daily[_d2].items() if k != "SITE" and v is not None and v > 0]
             _all_daily[_d2]["SITE"] = round(sum(_active_eff) / len(_active_eff)) if _active_eff else 0
     _mk_list  = sorted(_mk_set) + ["SITE"]
-    _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["Average"]
+    _sk_list  = [(_m.split("_")[0] if "_" in _m else _m) for _m in _mk_list[:-1]] + ["Avg"]
     _col_list = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#a855f7","#06b6d4","#f97316","#ec4899"][:len(_mk_list)]
     _daily_js = json.dumps(_all_daily)
     _mk_js    = json.dumps([str(_m) for _m in _mk_list])
@@ -2272,14 +2272,12 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     machines_html = ""
     machine_names = sorted(cycles.keys())
     nav_buttons = (
-        '<button class="nav-btn nav-tab-btn active" id="tbtn-today" onclick="switchTab(\'today\')">Today</button>\n'
-        '<button class="nav-btn nav-tab-btn" id="tbtn-stats" onclick="switchTab(\'stats\')">Statistics</button>\n'
         '<div style="border-top:1px solid #475569;margin:4px 0"></div>\n'
     ) + "".join(
         f'<a href="#machine-{mn.split("_")[0] if "_" in mn else mn}" class="nav-btn">{mn.split("_")[0] if "_" in mn else mn}</a>\n'
         for mn in machine_names
     )
-    for mname in machine_names:
+    for i, mname in enumerate(machine_names):
         c_list     = cycles.get(mname, [])
         d_data     = downtimes.get(mname, {})
         d_list     = d_data.get("downtimes", [])
@@ -2289,8 +2287,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         eff        = round(total_run / total_min * 100) if total_min else 0
         short_name = mname.split("_")[0] if "_" in mname else mname
 
-
-        machines_html += f"""
+        sep = f'<div class="machine-sep">{short_name}</div>' if i > 0 else ''
+        machines_html += sep + f"""
         <div class="machine-card" id="machine-{short_name}">
           <div class="machine-header">
             <div class="machine-title">
@@ -2332,7 +2330,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 
   /* ── Machine card ── */
   .machine-card{{background:#FFFFFF;border-radius:2px;box-shadow:0 2px 4px rgba(0,0,0,.3);margin-bottom:16px;overflow:hidden}}
-  .machine-header{{background:#3DA9D7;color:white;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}}
+  .machine-header{{background:#1e293b;color:white;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}}
   .machine-title{{display:flex;flex-direction:column;gap:2px}}
   .machine-id{{font-size:1.1rem;font-weight:500}}
   .machine-full{{font-size:.7rem;opacity:.8;word-break:break-all}}
@@ -2452,7 +2450,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     .stats-controls label{{font-size:0.78rem}}
     .stats-controls input[type=date]{{font-size:0.78rem;padding:4px 6px;max-width:130px}}
     .stats-controls button{{padding:5px 10px;font-size:0.75rem}}
-    .stats-table th,.stats-table td{{padding:5px 8px;font-size:0.9rem}}
+    .stats-table th,.stats-table td{{padding:4px 4px;font-size:0.75rem;white-space:nowrap;overflow:hidden}}
     .chart-legend{{gap:6px}}
     .leg-item{{font-size:0.72rem}}
     /* Scroll-top */
@@ -2494,14 +2492,22 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   .two-charts{{display:flex;flex-direction:column;gap:20px;margin-top:12px}}
   .chart-panel{{background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1);padding:16px}}
   .chart-title{{font-size:0.9rem;font-weight:700;color:#1e293b;margin-bottom:10px}}
-  .chart-wrap{{position:relative;height:350px}}
+  .chart-scroll-outer{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
+  .chart-wrap{{position:relative;height:350px;min-width:600px}}
   .chart-legend{{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}}
   .leg-item{{display:flex;align-items:center;gap:5px;font-size:0.8rem;color:#334155;font-weight:500}}
   .leg-dot{{width:11px;height:11px;border-radius:50%;display:inline-block}}
-  .stats-table{{border-collapse:collapse;font-size:0.96rem;width:100%;margin-top:16px}}
+  .stats-table{{border-collapse:collapse;font-size:0.96rem;width:100%;margin-top:16px;table-layout:fixed}}
   .stats-table th{{background:#1e293b;color:#fff;padding:6px 12px;text-align:center}}
   .stats-table td{{padding:5px 12px;text-align:center;border-bottom:1px solid #e2e8f0}}
   @media(max-width:900px){{.two-charts{{grid-template-columns:1fr}}}}
+  /* ── Block dividers ── */
+  .block-header{{background:#1e293b;color:#fff;padding:10px 16px;border-radius:6px;margin:20px 0 12px;display:flex;align-items:center;gap:8px;font-size:0.9rem;font-weight:700;letter-spacing:0.04em}}
+  .block-header.machines{{background:#1e293b;margin-top:28px}}
+  /* ── Machine separator ── */
+  .machine-sep{{display:flex;align-items:center;gap:10px;margin:24px 0 10px;font-size:0.72rem;color:#94a3b8;font-weight:700;letter-spacing:0.1em;text-transform:uppercase}}
+  .machine-sep::before,.machine-sep::after{{content:'';flex:1;height:1px;background:#e2e8f0}}
+  .machine-card{{border-top:3px solid #3DA9D7}}
 </style>
 </head>
 <body>
@@ -2512,41 +2518,38 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     Generated: {generated}
   </div>
 </div>
-<div id="tab-today">
 <div class="container">
-  <div class="legend">
-    <span><span class="dot" style="background:#4CAF50"></span>Running</span>
-    <span><span class="dot" style="background:#F44336"></span>Downtime</span>
+  <div class="block-header">📊 Statistics</div>
+  <div id="machine-filter" style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 8px"></div>
+  <div class="two-charts">
+    <div class="chart-panel">
+      <h3 class="chart-title">Today — Hourly Efficiency</h3>
+      <div class="chart-scroll-outer"><div class="chart-wrap"><canvas id="effChartToday"></canvas></div></div>
+      <div id="today-table-wrap"></div>
+    </div>
+    <div class="chart-panel">
+      <h3 class="chart-title">Period Trend</h3>
+      <div class="stats-controls">
+        <label>From: <input type="date" id="stat-from" value="{(datetime.now()-timedelta(days=6)).strftime('%Y-%m-%d')}"></label>
+        <label>To: <input type="date" id="stat-to" value="{today_str}"></label>
+        <button onclick="updatePeriodChart()">Apply</button>
+        <button onclick="setRange(7)">7d</button>
+        <button onclick="setRange(30)">30d</button>
+        <button onclick="setRange(90)">90d</button>
+        <button onclick="setRange(180)">180d</button>
+        <button onclick="setRange(365)">1y</button>
+      </div>
+      <div class="chart-scroll-outer"><div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div></div>
+    </div>
+  </div>
+  <div id="avg-table-wrap"></div>
+  <div class="block-header machines">🏭 Machines
+    <span style="margin-left:auto;font-weight:400;font-size:0.78rem;opacity:0.8">
+      <span class="dot" style="background:#4CAF50;border-radius:2px"></span> Running &nbsp;
+      <span class="dot" style="background:#F44336;border-radius:2px"></span> Downtime
+    </span>
   </div>
   {machines_html}
-</div>
-</div>
-<div id="tab-stats" style="display:none">
-  <div class="container">
-    <div id="machine-filter" style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 0 8px"></div>
-    <div class="two-charts">
-      <div class="chart-panel">
-        <h3 class="chart-title">Today — Hourly Efficiency</h3>
-        <div class="chart-wrap"><canvas id="effChartToday"></canvas></div>
-        <div id="today-table-wrap"></div>
-      </div>
-      <div class="chart-panel">
-        <h3 class="chart-title">Period Trend</h3>
-        <div class="stats-controls">
-          <label>From: <input type="date" id="stat-from" value="{(datetime.now()-timedelta(days=6)).strftime('%Y-%m-%d')}"></label>
-          <label>To: <input type="date" id="stat-to" value="{today_str}"></label>
-          <button onclick="updatePeriodChart()">Apply</button>
-          <button onclick="setRange(7)">7d</button>
-          <button onclick="setRange(30)">30d</button>
-          <button onclick="setRange(90)">90d</button>
-          <button onclick="setRange(180)">180d</button>
-          <button onclick="setRange(365)">1y</button>
-        </div>
-        <div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div>
-      </div>
-    </div>
-    <div id="avg-table-wrap"></div>
-  </div>
 </div>
 <div id="nav-overlay"></div>
 <button id="nav-toggle" title="Навігація">&#9776;</button>
@@ -2942,29 +2945,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   }});
 }})();
 
-function switchTab(name){{
-  document.getElementById('tab-today').style.display=name==='today'?'':'none';
-  document.getElementById('tab-stats').style.display=name==='stats'?'':'none';
-  var t1=document.getElementById('tbtn-today');
-  var t2=document.getElementById('tbtn-stats');
-  if(t1) t1.classList.toggle('active',name==='today');
-  if(t2) t2.classList.toggle('active',name==='stats');
-  try{{localStorage.setItem('activeTab',name);}}catch(e){{}}
-  if(name==='stats'){{
-    setTimeout(function(){{requestAnimationFrame(function(){{
-      if(window.initToday) window.initToday();
-      if(window.setRange)  window.setRange(7);
-    }});}},80);
-  }}
-  // close drawer after tab switch
-  var nav=document.getElementById('nav-sidebar');
-  var overlay=document.getElementById('nav-overlay');
-  if(nav) nav.classList.remove('open');
-  if(overlay) overlay.classList.remove('open');
-}}
 document.addEventListener('DOMContentLoaded',function(){{
-  var saved;try{{saved=localStorage.getItem('activeTab');}}catch(e){{}}
-  if(saved&&saved!=='today') switchTab(saved);
+  setTimeout(function(){{requestAnimationFrame(function(){{
+    if(window.initToday) window.initToday();
+    if(window.setRange)  window.setRange(7);
+  }});}},80);
 }});
 </script>
 </body>
