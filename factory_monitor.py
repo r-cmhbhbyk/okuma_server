@@ -1548,13 +1548,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     # Додаємо алерти про великі простої (>= threshold) з оновленням sent_alerts
     if downtime_alerts:
         lines.append("")
-        for mname, d, alert_key, is_repeat in downtime_alerts:
-            short = mname.split("_")[0]
-
-            # Позначка: 🔴🔴 для повторних (якщо вже не в ongoing секції)
-            if is_repeat:
-                lines.append(f"  ⚠️ <b>{short}</b> repeated alert: {d['duration']} min")
-
+        for mname, d, alert_key, _ in downtime_alerts:
             # Оновлюємо інформацію про алерт
             sent_alerts[alert_key] = {
                 "machine": mname,
@@ -2799,7 +2793,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
     tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:opts()}});
-    requestAnimationFrame(function(){{tCh.resize();}});
+    requestAnimationFrame(function(){{tCh.resize();var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-today',d2);
     var ttb=document.getElementById('today-table-wrap');
     if(ttb){{
@@ -2888,6 +2882,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     if(pCh)pCh.destroy();
     var ctx=document.getElementById('effChartPeriod');if(!ctx)return;
     pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts()}});
+    requestAnimationFrame(function(){{var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-period',d2);
     var tb=document.getElementById('avg-table-wrap');
     if(tb&&dates.length){{
