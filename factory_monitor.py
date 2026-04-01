@@ -222,18 +222,10 @@ def load_target_times():
     use_excel = False
     
     if excel_available:
-        if cache_exists:
-            # Є обидва - порівнюємо timestamp
-            if excel_mtime > cache_mtime:
-                log("✓ Excel is newer than cache - will update from Excel")
-                use_excel = True
-            else:
-                log("✓ Cache is up-to-date - will use cache")
-                use_excel = False
-        else:
-            # Є тільки Excel - використовуємо його
-            log("✓ No cache exists - will load from Excel")
-            use_excel = True
+        # Завжди читаємо з Excel якщо він доступний — mtime на мережевому диску
+        # може не оновлюватись одразу після збереження файлу
+        log("✓ Excel accessible - will load from Excel")
+        use_excel = True
     else:
         if cache_exists:
             # Excel недоступний, є кеш - використовуємо кеш
@@ -1314,7 +1306,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     Умови відправлення алерту:
     1. Є новий невідрапортований простій ≥45 хв, АБО
     2. Є старий ongoing простій що збільшився на +45 хв, АБО
-    3. Є різниця між Calculated та Target >10%
+    3. Є різниця між Calculated та Target >5%
     
     Додаткові правила:
     - Не відправляємо з 20:00 до 08:00
@@ -1414,8 +1406,9 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     
     log(f"Found {len(downtime_alerts)} downtime alerts")
     
-    # Збираємо алерти про перевищення Target >10%
+    # Збираємо алерти про перевищення Target >5%
     target_alerts = []
+    on_target = []  # Програми в нормі (≤5%)
     no_norm_alerts = []  # Програми без норми в Excel
     machines_checked = set()  # Унікальні машини які перевірялись
     machines_with_issues = set()  # Машини з проблемами
@@ -1476,13 +1469,13 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                 diff_pct = ((calc_target - excel_target) / excel_target) * 100
                 log(f"    {prog}: Calculated={calc_target}, Target={excel_target}, Diff={round(diff_pct, 1)}%")
 
-                if abs(diff_pct) > 10:
-                    log(f"    ✓ Adding target alert (difference >10%)")
-                    # ЗАВЖДИ додаємо - відправляємо кожен раз незалежно від історії
-                    target_alerts.append((machine_short, prog, calc_target, excel_target, diff_pct))
-                    machines_with_issues.add(machine_short)  # Додаємо до проблемних
+                if abs(diff_pct) > 5:
+                    log(f"    ✓ Adding target alert (difference >5%)")
+                    target_alerts.append((machine_short, prog, calc_target, excel_target, diff_pct, len(prog_cycles)))
+                    machines_with_issues.add(machine_short)
                 else:
-                    log(f"    ✗ Difference ≤10%")
+                    log(f"    ✓ On target (difference ≤5%)")
+                    on_target.append((machine_short, prog, calc_target, excel_target, diff_pct, len(prog_cycles)))
             else:
                 log(f"    {prog}: No target found in Excel")
                 no_norm_alerts.append((machine_short, prog, calc_target))
@@ -1506,7 +1499,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     all_ongoing.sort(key=lambda x: x[1]["duration"], reverse=True)
 
     # Формуємо повідомлення
-    if downtime_alerts or target_alerts or no_norm_alerts or all_ongoing:
+    if downtime_alerts or target_alerts or on_target or no_norm_alerts or all_ongoing:
         # Є проблеми або ongoing простої
         lines = [
             f"⚠️ <b>Factory Alert</b>  {period_to.strftime('%H:%M')}",
@@ -1557,24 +1550,25 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                 "last_alert": current_time.isoformat()
             }
     
-    # Додаємо алерти про перевищення Target
-    if target_alerts:
-        lines.append("\n\n⚙️ <b>Cycle Time Alerts (>10% difference):</b>")
-        for machine, prog, calc, target, diff_pct in target_alerts:
+    # Додаємо секцію Cycle Time (всі програми з нормою)
+    all_cycle_entries = target_alerts + on_target
+    if all_cycle_entries:
+        lines.append("\n\n⚙️ <b>Cycle Time:</b>")
+        for machine, prog, calc, target, diff_pct, n_cycles in all_cycle_entries:
             abs_diff = abs(diff_pct)
-            if diff_pct > 0:
-                # Повільніше - червоний
+            if abs_diff <= 5:
+                status = f'<b>{round(abs_diff, 1)}% {"slower" if diff_pct > 0 else "faster"}</b> 🟢'
+            elif diff_pct > 0:
                 status = f'<b>{round(abs_diff, 1)}% slower</b> 🔴'
             else:
-                # Швидше - зелений
-                status = f'<b>{round(abs_diff, 1)}% faster</b> 🟢'
-            
+                status = f'<b>{round(abs_diff, 1)}% faster</b> 🔵'
+
             lines.append(
                 f"\n📊 <b>{machine}</b> - {prog}"
                 f"\n   Calculated: {calc} min | Target: {target} min"
+                f"\n   Cycles: {n_cycles}"
                 f"\n   {status}"
             )
-            # НЕ зберігаємо target алерти - відправляємо завжди
 
     # Додаємо алерти про відсутність норми
     if no_norm_alerts:
@@ -2230,13 +2224,15 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             # Порівняння
             if excel_target:
                 diff = round(calc_target - excel_target, 2)  # Округлення до сотих
-                diff_pct = round((diff / excel_target) * 100, 2) if excel_target else 0  # Також до сотих
-                if diff > 0:
-                    comparison = f'<span style="color:#ef4444">+{diff} min (+{diff_pct}%)</span>'
-                elif diff < 0:
-                    comparison = f'<span style="color:#22c55e">{diff} min ({diff_pct}%)</span>'
+                diff_pct = round((diff / excel_target) * 100, 2) if excel_target else 0
+                sign = f'+{diff}' if diff > 0 else str(diff)
+                sign_pct = f'+{diff_pct}' if diff_pct > 0 else str(diff_pct)
+                if abs(diff_pct) <= 5:
+                    comparison = f'<span style="color:#22c55e">{sign} min ({sign_pct}%)</span>'
+                elif diff > 0:
+                    comparison = f'<span style="color:#ef4444">{sign} min ({sign_pct}%)</span>'
                 else:
-                    comparison = '<span style="color:#64748b">Match</span>'
+                    comparison = f'<span style="color:#3b82f6">{sign} min ({sign_pct}%)</span>'
                 excel_col = f'{excel_target} min'
             else:
                 # Якщо не знайшли для цього станку, але є для іншого
