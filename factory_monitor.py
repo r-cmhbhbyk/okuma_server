@@ -1478,7 +1478,7 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                     on_target.append((machine_short, prog, calc_target, excel_target, diff_pct, len(prog_cycles)))
             else:
                 log(f"    {prog}: No target found in Excel")
-                no_norm_alerts.append((machine_short, prog, calc_target))
+                no_norm_alerts.append((machine_short, prog, calc_target, len(prog_cycles)))
                 machines_no_norm.add(machine_short)
     
     log(f"Found {len(target_alerts)} target alerts, {len(no_norm_alerts)} no-norm alerts")
@@ -1572,11 +1572,11 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
 
     # Додаємо алерти про відсутність норми
     if no_norm_alerts:
-        lines.append("\n\n❓ <b>No norm in Excel:</b>")
-        for machine, prog, calc in no_norm_alerts:
+        lines.append("\n\n❓ <b>Norm missing:</b>")
+        for machine, prog, calc, n_cycles in no_norm_alerts:
             lines.append(
                 f"\n📋 <b>{machine}</b> - {prog}"
-                f"\n   Cycle: {calc} min | Norm: missing"
+                f"\n   Cycle: {calc} min | Cycles: {n_cycles}"
             )
 
     # Перевіряємо чи треба відправляти "All OK" повідомлення
