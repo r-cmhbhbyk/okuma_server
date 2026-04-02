@@ -713,20 +713,22 @@ def save_to_db(conn, date_str, cycles, downtimes):
         """, (date_str, mname, run_min, down_min, total_min, len(c_list), avg_cycle, eff))
         
         # Зберігаємо окремі цикли
+        conn.execute("DELETE FROM cycle_events WHERE date=? AND machine=?", (date_str, mname))
         for c in c_list:
             conn.execute("""
-                INSERT OR IGNORE INTO cycle_events
+                INSERT INTO cycle_events
                 (date,machine,program,start_time,end_time,duration)
                 VALUES (?,?,?,?,?,?)
             """, (date_str, mname, c.get("program", "—"),
                   c["start"].strftime("%H:%M") if c.get("start") else "—",
                   c["end"].strftime("%H:%M") if c.get("end") else "—",
                   c["duration"]))
-        
+
         # Зберігаємо простої
+        conn.execute("DELETE FROM downtime_events WHERE date=? AND machine=?", (date_str, mname))
         for d in d_data["downtimes"]:
             conn.execute("""
-                INSERT OR IGNORE INTO downtime_events
+                INSERT INTO downtime_events
                 (date,machine,start_time,end_time,duration,reason)
                 VALUES (?,?,?,?,?,?)
             """, (date_str, mname,
