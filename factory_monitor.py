@@ -45,6 +45,7 @@ URL                 = "http://192.168.1.210/csv/OutputCSVWeb.aspx?FactoryID=1&Ar
 WAIT_TIME           = 300
 HOURS_BACK          = 24
 ALERT_THRESHOLD_MIN = 45
+S2S_GAP_THRESHOLD_MIN = 15  # Макс. розрив між циклами для start-to-start (хв); якщо більше — цикл не розтягується
 
 # Повний список станків дільниці — використовується для графіків і розрахунку SITE
 # Станки без даних отримують ефективність 0 і відображаються на графіку
@@ -910,11 +911,18 @@ def apply_start_to_start_cycles(cycles_dict, counter_markers, mr_data=None):
                 # ── БЕЗ COUNTER: start-to-start ──────────────────────────────
                 for i, c in enumerate(prog_cycles):
                     c_start = c["start"]
+                    green_duration = c.get("duration", 0)  # реальний час зеленого сектору
                     if i + 1 < len(prog_cycles):
-                        c_end = prog_cycles[i + 1]["start"]
+                        next_start = prog_cycles[i + 1]["start"]
+                        s2s_candidate = (next_start - c_start).total_seconds() / 60
+                        # Не розтягуємо цикл якщо розрив між циклами більше S2S_GAP_THRESHOLD_MIN
+                        # — це означає що станок був вимкнений або стояв між циклами
+                        if s2s_candidate > S2S_GAP_THRESHOLD_MIN:
+                            c_end = c.get("end")
+                        else:
+                            c_end = next_start
                     else:
                         c_end = c.get("end")
-                    green_duration = c.get("duration", 0)  # реальний час зеленого сектору
                     s2s_duration = round((c_end - c_start).total_seconds() / 60, 2) if c_end else green_duration
                     # Маркер на старті ПЕРШОГО циклу програми (cycle = s2s першого)
                     if i == 0:
