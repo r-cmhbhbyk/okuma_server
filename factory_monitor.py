@@ -703,7 +703,7 @@ def save_to_db(conn, date_str, cycles, downtimes):
         d_data    = downtimes[mname]
         run_min   = d_data["total_run"]
         down_min  = d_data["total_down"]
-        total_min = d_data["total_min"]
+        total_min = _work_window_min(date_str)
         eff       = round(run_min / total_min * 100, 1) if total_min else 0
         avg_cycle = round(sum(c["duration"] for c in c_list) / len(c_list), 1) if c_list else 0
         conn.execute("""
@@ -1096,7 +1096,7 @@ def analyze_downtime(rows):
 
         result[mname] = {
             "downtimes":  downtimes,
-            "total_run":  sum(1 for r in filtered_rows if r["RunState"] == "1"),
+            "total_run":  sum(1 for r in mrows if r["RunState"] == "1"),
             "total_down": sum(1 for r in filtered_rows if r["RunState"] == "0"),
             "total_min":  len(filtered_rows),
         }
