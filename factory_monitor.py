@@ -2785,7 +2785,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     scales:{{y:{{min:-5,max:100,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:true,text:'Efficiency'}}}},x:{{ticks:{{maxRotation:45}}}}}}}};}}
   function leg(id,ds2){{
     var el=document.getElementById(id);if(!el)return;
-    el.innerHTML=ds2.map(function(d,i){{return '<span class="leg-item"><span class="leg-dot" style="background:'+COLS[i]+'"></span>'+d.label+'</span>';}}).join('');
+    el.innerHTML=ds2.map(function(d,i){{
+      var col=COLS[i]||d.borderColor||'#888';
+      return '<span class="leg-item"><span class="leg-dot" style="background:'+col+'"></span>'+d.label+'</span>';
+    }}).join('');
   }}
 
   function initToday(){{
@@ -2885,6 +2888,59 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     var dates=Object.keys(ALL).sort().filter(function(d){{return d>=from&&d<=to;}});
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
     var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
+    // Weekly average curve
+    (function(){{
+      var sel=getSelected();
+      var selM=sel.filter(function(k){{return k!=='SITE';}});
+      if(!selM.length)return;
+      // Group dates by ISO week (year+week key to handle year boundaries)
+      var weekGroups={{}};
+      dates.forEach(function(d){{
+        var dt=new Date(d+'T00:00:00');
+        var wn=getISOWeek(dt);
+        // use ISO year: if Jan date belongs to last year's week, use previous year
+        var yr=dt.getFullYear();
+        if(wn>=52&&dt.getMonth()===0)yr--;
+        if(wn===1&&dt.getMonth()===11)yr++;
+        var wk=yr+'_'+wn;
+        if(!weekGroups[wk])weekGroups[wk]=[];
+        weekGroups[wk].push(d);
+      }});
+      // Per-week average: mean of daily averages (each day first averaged across machines)
+      var weekAvg={{}};
+      Object.keys(weekGroups).forEach(function(wk){{
+        var dayAvgs=[];
+        weekGroups[wk].forEach(function(d){{
+          var vals=selM.map(function(k){{return (ALL[d]&&ALL[d][k]!=null)?ALL[d][k]:0;}});
+          var dayAvg=vals.reduce(function(a,b){{return a+b;}},0)/vals.length;
+          // Include only days when machines actually worked (weekdays always, weekends only if dayAvg > 0)
+          var dow=new Date(d+'T00:00:00').getDay();
+          if((dow===0||dow===6)&&dayAvg===0) return;
+          dayAvgs.push(dayAvg);
+        }});
+        // Always divide by 5 (standard work week): weekday work is expected,
+        // weekend work adds bonus without inflating the denominator
+        weekAvg[wk]=Math.min(100,Math.round(dayAvgs.reduce(function(a,b){{return a+b;}},0)/5));
+      }});
+      // Place weekly average only at the center date of each week → smooth trend curve
+      var weekCenter={{}};
+      Object.keys(weekGroups).forEach(function(wk){{
+        var wdates=weekGroups[wk];
+        var mid=wdates[Math.floor((wdates.length-1)/2)];
+        weekCenter[mid]=weekAvg[wk];
+      }});
+      var weekData=dates.map(function(d){{
+        return (weekCenter[d]!=null)?weekCenter[d]:null;
+      }});
+      d2.push({{
+        label:'Week avg',data:weekData,
+        borderColor:'rgba(30,41,59,0.85)',backgroundColor:'rgba(30,41,59,0.06)',
+        tension:0.4,pointRadius:5,pointHoverRadius:7,
+        pointBackgroundColor:'rgba(30,41,59,0.85)',
+        borderWidth:2.5,borderDash:[6,3],
+        stepped:false,fill:false,spanGaps:true,order:10
+      }});
+    }})();
     if(pCh)pCh.destroy();
     var ctx=document.getElementById('effChartPeriod');if(!ctx)return;
     pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts()}});
