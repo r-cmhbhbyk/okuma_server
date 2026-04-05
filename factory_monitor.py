@@ -1740,10 +1740,14 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 "FROM cycle_events WHERE program NOT LIKE 'COUNTER%' "
                 "ORDER BY date,machine,start_time"
             ).fetchall():
+                _s = _r[3] if _r[3] and _r[3] != "—" else None
+                if not _s:
+                    continue  # skip records without valid start time (renders at 00:00)
+                _e = _r[4] if _r[4] and _r[4] != "—" else None
                 _cdata.append({
                     "d": _r[0],
                     "m": (_r[1].split("_")[0] if "_" in _r[1] else _r[1]),
-                    "p": _r[2], "s": _r[3], "e": _r[4], "dur": _r[5]
+                    "p": _r[2], "s": _s, "e": _e, "dur": _r[5]
                 })
     except Exception: pass
     _cdata_js = json.dumps(_cdata)
@@ -3037,7 +3041,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 (function(){{
   var RAW_ALL={_cdata_js};
   var progList=[],progColor={{}};
-  var PALETTE=['#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#f97316','#ec4899','#84cc16','#14b8a6'];
+  var PALETTE=['#3b82f6','#22c55e','#f59e0b','#0ea5e9','#a855f7','#06b6d4','#f97316','#65a30d','#84cc16','#14b8a6'];
   RAW_ALL.forEach(function(c){{
     if(progList.indexOf(c.p)===-1){{progList.push(c.p);progColor[c.p]=PALETTE[(progList.length-1)%PALETTE.length];}}
   }});
@@ -3067,12 +3071,18 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       var sess=sessMap[key];
       if(sess&&c.s){{
         var canExtend=false;
-        if(!sess.e){{canExtend=true;}}
+        if(!sess.e){{
+          // ongoing session — allow extending only if start is not too far ahead
+          var sh2=parseInt(c.s.split(':')[0]),sm2=parseInt(c.s.split(':')[1]||0);
+          var sh0=parseInt(sess.s.split(':')[0]),sm0=parseInt(sess.s.split(':')[1]||0);
+          canExtend=((sh2*60+sm2)-(sh0*60+sm0)<=SESSION_GAP*4);
+        }}
         else{{
           var eh2=parseInt(sess.e.split(':')[0]),em2=parseInt(sess.e.split(':')[1]||0);
           var sh2=parseInt(c.s.split(':')[0]),sm2=parseInt(c.s.split(':')[1]||0);
           var gap=(sh2*60+sm2)-(eh2*60+em2);
-          canExtend=(gap>=0&&gap<=SESSION_GAP);
+          // allow small overlap (gap<0) as well as normal gap
+          canExtend=(gap<=SESSION_GAP);
         }}
         if(canExtend){{
           if(c.e&&(!sess.e||c.e>sess.e)) sess.e=c.e;
@@ -3139,20 +3149,37 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         ctx.fillStyle='rgba(255,180,0,0.18)';
         ctx.fillRect(x,0,PX_PER_DAY,canvasH-TICK_H);
       }} else {{
-        // Non-working hours: darker gray
-        ctx.fillStyle='rgba(100,116,139,0.18)';
-        if(dow===1||dow===5){{
+        // Non-working hours: dark gray fill
+        // Mon(1): dark 0-7h, 19-24h
+        // Tue(2): dark 0-6.5h (Mon ends 19:00, no carry-over)
+        // Wed(3): dark 0.5-6.5h (Tue ends 00:30 Wed, so 00:00-00:30 is working)
+        // Thu(4): dark 0.5-6.5h (Wed ends 00:30 Thu)
+        // Fri(5): dark 0.5-7h, 19-24h (Thu ends 00:30 Fri)
+        ctx.fillStyle='rgba(71,85,105,0.45)';
+        if(dow===1){{
           ctx.fillRect(x,0,Math.round(7/24*PX_PER_DAY),canvasH-TICK_H);
           ctx.fillRect(x+Math.round(19/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(19/24*PX_PER_DAY),canvasH-TICK_H);
-        }} else {{
+        }} else if(dow===5){{
+          ctx.fillRect(x+Math.round(0.5/24*PX_PER_DAY),0,Math.round(7/24*PX_PER_DAY)-Math.round(0.5/24*PX_PER_DAY),canvasH-TICK_H);
+          ctx.fillRect(x+Math.round(19/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(19/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else if(dow===2){{
           ctx.fillRect(x,0,Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else {{
+          // Wed(3), Thu(4): 00:30-06:30 is non-working; 00:00-00:30 is working carry-over
+          ctx.fillRect(x+Math.round(0.5/24*PX_PER_DAY),0,Math.round(6.5/24*PX_PER_DAY)-Math.round(0.5/24*PX_PER_DAY),canvasH-TICK_H);
         }}
-        // Working hours idle: red background (program bars will cover it)
-        ctx.fillStyle='rgba(239,68,68,0.10)';
-        if(dow===1||dow===5){{
-          var iwx1=Math.round(7/24*PX_PER_DAY),iwx2=Math.round(19/24*PX_PER_DAY);
-          ctx.fillRect(x+iwx1,0,iwx2-iwx1,canvasH-TICK_H);
-        }}else{{
+        // Working hours: white background (program bars will cover it)
+        ctx.fillStyle='rgba(255,255,255,1)';
+        if(dow===1){{
+          ctx.fillRect(x+Math.round(7/24*PX_PER_DAY),0,Math.round(19/24*PX_PER_DAY)-Math.round(7/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else if(dow===5){{
+          ctx.fillRect(x,0,Math.round(0.5/24*PX_PER_DAY),canvasH-TICK_H);
+          ctx.fillRect(x+Math.round(7/24*PX_PER_DAY),0,Math.round(19/24*PX_PER_DAY)-Math.round(7/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else if(dow===2){{
+          ctx.fillRect(x+Math.round(6.5/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else {{
+          // Wed(3), Thu(4): 00:00-00:30 working + 06:30-24:00 working
+          ctx.fillRect(x,0,Math.round(0.5/24*PX_PER_DAY),canvasH-TICK_H);
           ctx.fillRect(x+Math.round(6.5/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
         }}
       }}
@@ -3165,10 +3192,23 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       }}
     }});
 
+    // ── Machine separator lines + name overlay ────────────────────────
     machines.forEach(function(m,ri){{
       var y=PAD+ri*(ROW_H+PAD);
-      ctx.strokeStyle='#e2e8f0'; ctx.lineWidth=1; ctx.setLineDash([]);
+      // Separator line — bold solid
+      ctx.strokeStyle='#334155'; ctx.lineWidth=2; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(0,y+ROW_H+PAD/2); ctx.lineTo(canvasW,y+ROW_H+PAD/2); ctx.stroke();
+      // Machine name as text overlay (top-left of each row)
+      var shortM=m.indexOf('_')!==-1?m.split('_')[0]:m;
+      ctx.save();
+      ctx.font='bold 11px sans-serif'; ctx.textAlign='left';
+      ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=4;
+      ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.6)';
+      ctx.strokeText(shortM,6,y+ROW_H/2+4);
+      ctx.fillStyle='#ffffff';
+      ctx.shadowBlur=0;
+      ctx.fillText(shortM,6,y+ROW_H/2+4);
+      ctx.restore();
     }});
 
     // ── Collect gap metadata (idle between programs, same machine+day) ─
@@ -3204,9 +3244,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     CDATA.forEach(function(c){{
       var ri=machines.indexOf(c.m); if(ri===-1) return;
       var di=dates.indexOf(c.d); if(di===-1) return;
+      if(!c.s) return; // skip records without valid start time
       var x=LABEL_W+di*PX_PER_DAY;
-      var sh=c.s?parseInt(c.s.split(':')[0]):0, sm=c.s?parseInt(c.s.split(':')[1]||0):0;
-      var eh=c.e?parseInt(c.e.split(':')[0]):0, em=c.e?parseInt(c.e.split(':')[1]||0):0;
+      var sh=parseInt(c.s.split(':')[0]),sm=parseInt(c.s.split(':')[1]||0);
+      var eh=c.e?parseInt(c.e.split(':')[0]):sh, em=c.e?parseInt(c.e.split(':')[1]||0):sm;
       var bx=x+Math.round((sh*60+sm)/1440*PX_PER_DAY);
       var ex=x+Math.round((eh*60+em)/1440*PX_PER_DAY);
       var bw=Math.max(ex-bx,4);
@@ -3223,15 +3264,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       barMeta.push({{x:bx,y:y+3,w:bw,h:ROW_H-6,c:c}});
     }});
 
-    // ── Gap duration labels (drawn on top of bars) ────────────────────
-    gapMeta.forEach(function(g){{
-      if(g.w>32){{
-        var txt=g.gapMin>=60?(Math.floor(g.gapMin/60)+'h'+(g.gapMin%60?g.gapMin%60+'m':'')):(g.gapMin+'m');
-        ctx.fillStyle='rgba(220,38,38,0.85)';
-        ctx.font='bold 9px sans-serif'; ctx.textAlign='center';
-        ctx.fillText(txt,g.x+g.w/2,g.y+g.h/2+3);
-      }}
-    }});
   }}
 
   // Initial draw: last 7 days
@@ -3258,12 +3290,21 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       var b=barMeta[i];
       if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){{found=b;break;}}
     }}
-    if(found){{
+    function showTip(html, cx, cy){{
       tip.style.display='block';
-      tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px';
+      tip.innerHTML=html;
+      var tw=tip.offsetWidth||200, th=tip.offsetHeight||70;
+      var tx=cx+14, ty=cy-32;
+      if(tx+tw>window.innerWidth-8) tx=cx-tw-14;
+      if(tx<8) tx=8;
+      if(ty+th>window.innerHeight-8) ty=cy-th-8;
+      if(ty<8) ty=cy+14;
+      tip.style.left=tx+'px'; tip.style.top=ty+'px';
+    }}
+    if(found){{
       var dm=found.c.dur?Math.round(found.c.dur):0;
       var durStr=dm>0?(dm>=60?(Math.floor(dm/60)+'h'+(dm%60?'\u00a0'+dm%60+'m':'')):dm+'\u00a0min'):'';
-      tip.innerHTML='<b>'+found.c.m+'</b> — '+found.c.p+'<br>'+found.c.d+'&nbsp;'+found.c.s+'–'+found.c.e+(durStr?'<br>'+durStr:'');
+      showTip('<b>'+found.c.m+'</b> — '+found.c.p+'<br>'+found.c.d+'&nbsp;'+found.c.s+'–'+(found.c.e||'…')+(durStr?'<br>'+durStr:''),e.clientX,e.clientY);
       return;
     }}
     // Check gap bars
@@ -3273,11 +3314,9 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       if(mx>=g.x&&mx<=g.x+g.w&&my>=g.y&&my<=g.y+g.h){{foundGap=g;break;}}
     }}
     if(foundGap){{
-      tip.style.display='block';
-      tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px';
       var h=Math.floor(foundGap.gapMin/60),m2=foundGap.gapMin%60;
       var durStr=h>0?(h+'h '+(m2?m2+'m':'')):m2+'m';
-      tip.innerHTML='⏸ <b>Idle: '+durStr+'</b><br>'+foundGap.m+' &nbsp;'+foundGap.d+'<br>'+foundGap.s+' – '+foundGap.e;
+      showTip('⏸ <b>Idle: '+durStr+'</b><br>'+foundGap.m+' &nbsp;'+foundGap.d+'<br>'+foundGap.s+' – '+foundGap.e,e.clientX,e.clientY);
     }} else tip.style.display='none';
   }});
   cv.addEventListener('mouseleave',function(){{tip.style.display='none';}});
