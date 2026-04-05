@@ -1731,6 +1731,22 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _mk_js    = json.dumps([str(_m) for _m in _mk_list])
     _sk_js    = json.dumps(_sk_list)
     _col_js   = json.dumps(_col_list)
+    # Cycle events for Batch Gantt
+    _cdata = []
+    try:
+        if conn:
+            for _r in conn.execute(
+                "SELECT date,machine,program,start_time,end_time,duration "
+                "FROM cycle_events WHERE program NOT LIKE 'COUNTER%' "
+                "ORDER BY date,machine,start_time"
+            ).fetchall():
+                _cdata.append({
+                    "d": _r[0],
+                    "m": (_r[1].split("_")[0] if "_" in _r[1] else _r[1]),
+                    "p": _r[2], "s": _r[3], "e": _r[4], "dur": _r[5]
+                })
+    except Exception: pass
+    _cdata_js = json.dumps(_cdata)
     # ────────────────────────────────────────────────────────────────────
 
     def timeline_bar(mname):
@@ -2492,8 +2508,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   .two-charts{{display:flex;flex-direction:column;gap:20px;margin-top:12px}}
   .chart-panel{{background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1);padding:16px}}
   .chart-title{{font-size:0.9rem;font-weight:700;color:#1e293b;margin-bottom:10px}}
-  .chart-scroll-outer{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
-  .chart-wrap{{position:relative;height:350px;min-width:600px}}
+  .chart-scroll-outer{{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid red;margin-left:-16px;margin-right:-16px}}
+  .chart-wrap{{position:relative;height:350px;min-width:600px;background:#f8fafc}}
   .chart-legend{{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}}
   .leg-item{{display:flex;align-items:center;gap:5px;font-size:0.8rem;color:#334155;font-weight:500}}
   .leg-dot{{width:11px;height:11px;border-radius:50%;display:inline-block}}
@@ -2530,8 +2546,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     <div class="chart-panel">
       <h3 class="chart-title">Period Trend</h3>
       <div class="stats-controls">
-        <label>From: <input type="date" id="stat-from" value="{(datetime.now()-timedelta(days=6)).strftime('%Y-%m-%d')}"></label>
-        <label>To: <input type="date" id="stat-to" value="{today_str}"></label>
+        <label>From: <input type="text" id="stat-from" placeholder="dd.mm.yyyy" value="{(datetime.now()-timedelta(days=6)).strftime('%d.%m.%Y')}" style="width:90px"></label>
+        <label>To: <input type="text" id="stat-to" placeholder="dd.mm.yyyy" value="{datetime.now().strftime('%d.%m.%Y')}" style="width:90px"></label>
         <button onclick="updatePeriodChart()">Apply</button>
         <button onclick="setRange(7)">7d</button>
         <button onclick="setRange(30)">30d</button>
@@ -2539,10 +2555,16 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         <button onclick="setRange(180)">180d</button>
         <button onclick="setRange(365)">1y</button>
       </div>
-      <div class="chart-scroll-outer"><div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div></div>
+      <div class="chart-scroll-outer">
+        <div class="chart-wrap"><canvas id="effChartPeriod"></canvas></div>
+      </div>
+      <div style="margin-top:6px;font-size:0.75rem;font-weight:700;color:#475569;padding:4px 0 2px;text-transform:uppercase;letter-spacing:.05em">Batch Gantt</div>
+      <div id="gantt-scroll-outer" class="chart-scroll-outer">
+        <div class="chart-wrap"><canvas id="batchGantt" style="display:block"></canvas></div>
+      </div>
     </div>
   </div>
-  <div id="avg-table-wrap"></div>
+  <div id="batch-tooltip" style="position:fixed;pointer-events:none;z-index:9999;background:#1e293b;color:white;padding:6px 10px;border-radius:6px;font-size:.78rem;box-shadow:0 4px 12px rgba(0,0,0,.3);display:none;max-width:240px;white-space:normal;line-height:1.4"></div>
   <div class="block-header machines">🏭 Machines
     <span style="margin-left:auto;font-weight:400;font-size:0.78rem;opacity:0.8">
       <span class="dot" style="background:#4CAF50;border-radius:2px"></span> Running &nbsp;
@@ -2765,12 +2787,12 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       if(k==='SITE'){{
         var selM=sel.filter(function(m){{return m!=='SITE';}});
         data=labels.map(function(l){{
-          if(!selM.length) return 0;
-          var vals=selM.map(function(m){{var v=getFn(m,l);return v!=null?v:0;}});
-          return Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length);
+          if(!selM.length) return null;
+          var vals=selM.map(function(m){{return getFn(m,l);}}).filter(function(v){{return v!=null;}});
+          return vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):null;
         }});
       }}else{{
-        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}});
+        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:null;}});
       }}
       return {{label:SK[i],data:data,
         borderColor:COLS[i],backgroundColor:COLS[i]+'22',tension:0.3,
@@ -2779,10 +2801,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         fill:false,spanGaps:false}};
     }});
   }}
-  function opts(){{return{{responsive:true,maintainAspectRatio:false,
+  function opts(){{return{{clip:false,responsive:true,maintainAspectRatio:false,layout:{{padding:0}},
     interaction:{{mode:'index',intersect:false}},
     plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return c.dataset.label+': '+(c.parsed.y!=null?c.parsed.y+'%':'—');}}}}}}  }},
-    scales:{{y:{{min:-5,max:100,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:true,text:'Efficiency'}}}},x:{{ticks:{{maxRotation:45}}}}}}}};}}
+    scales:{{y:{{display:false,min:-5,max:100,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:false}}}},x:{{display:false,offset:true,ticks:{{maxRotation:45}},grid:{{display:false}}}}}}}};}}
   function leg(id,ds2){{
     var el=document.getElementById(id);if(!el)return;
     el.innerHTML=ds2.map(function(d,i){{
@@ -2837,23 +2859,43 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   }}
   var weekendPeriodPlugin={{
     id:'weekendPeriod',
+    afterLayout(chart){{
+      var ca=chart.chartArea;
+      ca.left=0;ca.right=chart.width;ca.width=chart.width;
+      ca.top=0;ca.bottom=chart.height;ca.height=chart.height;
+      var xS=chart.scales.x;
+      if(xS){{xS.left=0;xS.right=chart.width;xS.width=chart.width;xS._startPixel=0;xS._endPixel=chart.width;xS._length=chart.width;}}
+      var yS=chart.scales.y;
+      if(yS){{yS.top=0;yS.bottom=chart.height;yS.height=chart.height;yS._startPixel=0;yS._endPixel=chart.height;yS._length=chart.height;}}
+    }},
     beforeDraw(chart){{
       var c=chart.chartArea,xScale=chart.scales.x;
       if(!c) return;
+      var ctx2=chart.ctx;
+      ctx2.save();ctx2.fillStyle='#f8fafc';ctx2.fillRect(0,0,chart.width,chart.height);ctx2.restore();
       var labels=chart.data.labels,n=labels.length;if(n<2)return;
       var step=xScale.getPixelForValue(1)-xScale.getPixelForValue(0);
-      var ctx2=chart.ctx;
-      // Weekend shading + SAT/SUN label
+      // Weekend shading + SAT/SUN label + day separator lines
       labels.forEach(function(lbl,i){{
         var dow=parseLblDate(lbl).getDay();
+        var cx=xScale.getPixelForValue(i);
         if(dow===0||dow===6){{
-          var cx=xScale.getPixelForValue(i);
           ctx2.save();
-          ctx2.fillStyle='rgba(255,180,0,0.13)';
-          ctx2.fillRect(cx-step/2,c.top,step,c.height);
+          ctx2.fillStyle='rgba(255,180,0,0.18)';
+          ctx2.fillRect(cx-step/2,0,step,chart.height);
           ctx2.fillStyle='rgba(180,100,0,0.6)';
           ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
           ctx2.fillText(dow===6?'SAT':'SUN',cx,c.top+11);
+          ctx2.restore();
+        }}
+        // Day separator line at left edge of each column (between prev day and this day)
+        if(i>0){{
+          var sepX=cx-step/2;
+          var prevDow=parseLblDate(labels[i-1]).getDay();
+          ctx2.save();
+          ctx2.strokeStyle='#475569'; ctx2.lineWidth=1;
+          ctx2.setLineDash([]);
+          ctx2.beginPath();ctx2.moveTo(sepX,0);ctx2.lineTo(sepX,chart.height);ctx2.stroke();
           ctx2.restore();
         }}
       }});
@@ -2876,16 +2918,22 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           var sepX=(xScale.getPixelForValue(idxs[0])+xScale.getPixelForValue(prev[prev.length-1]))/2;
           ctx2.strokeStyle='rgba(80,80,180,0.35)';ctx2.lineWidth=1;
           ctx2.setLineDash([4,3]);ctx2.beginPath();
-          ctx2.moveTo(sepX,c.top);ctx2.lineTo(sepX,c.bottom);ctx2.stroke();
+          ctx2.moveTo(sepX,0);ctx2.lineTo(sepX,chart.height);ctx2.stroke();
         }}
         ctx2.restore();
       }});
     }}
   }};
+  function euToISO(s){{var p=s.split('.');return p.length===3?p[2]+'-'+p[1]+'-'+p[0]:s;}}
+  function isoToEu(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
   function updatePeriodChart(){{
-    var from=document.getElementById('stat-from').value;
-    var to=document.getElementById('stat-to').value;
-    var dates=Object.keys(ALL).sort().filter(function(d){{return d>=from&&d<=to;}});
+    var from=euToISO(document.getElementById('stat-from').value);
+    var to=euToISO(document.getElementById('stat-to').value);
+    // Generate ALL dates in range so both Period Trend and Batch Timeline
+    // have identical column counts — required for x-axis alignment
+    var dates=[];
+    {{var _c=new Date(from+'T00:00:00'),_e=new Date(to+'T00:00:00');
+      while(_c<=_e){{dates.push(_c.toISOString().slice(0,10));_c.setDate(_c.getDate()+1);}}}}
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
     var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
     // Weekly average curve
@@ -2943,46 +2991,280 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     }})();
     if(pCh)pCh.destroy();
     var ctx=document.getElementById('effChartPeriod');if(!ctx)return;
+    var _wrap=ctx.closest('.chart-wrap');
+    var _minW=Math.max(600,dates.length*22);
+    if(_wrap){{_wrap.style.width='';_wrap.style.minWidth=_minW+'px';}}
     pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts()}});
-    requestAnimationFrame(function(){{var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
+    requestAnimationFrame(function(){{
+      var _actualW=(_wrap&&_wrap.offsetWidth>0)?_wrap.offsetWidth:_minW;
+      if(_wrap)_wrap.style.width=_actualW+'px';
+      if(pCh)pCh.resize(_actualW,350);
+      if(window.updateBatchGantt)window.updateBatchGantt(from,to,_actualW);
+    }});
     leg('legend-period',d2);
-    var tb=document.getElementById('avg-table-wrap');
-    if(tb&&dates.length){{
-      var sel=getSelected();
-      var selM=sel.filter(function(k){{return k!=='SITE';}});
-      // per-machine period averages (excluding SITE)
-      var mAvgs={{}};
-      selM.forEach(function(k){{
-        var vals=dates.map(function(dt){{return (ALL[dt]&&ALL[dt][k]!=null)?ALL[dt][k]:null;}}).filter(function(v){{return v!==null;}});
-        mAvgs[k]=vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):0;
-      }});
-      // grand average across all selected machines
-      var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
-      var grandCol=grandAvg>=75?'#22c55e':grandAvg>=50?'#f59e0b':'#ef4444';
-      var periodStr=fmtDate(from)+(from!==to?' – '+fmtDate(to):'');
-      var hdr=sel.map(function(k){{var si=MK.indexOf(k);return '<th>'+SK[si]+'</th>';}}).join('');
-      var cells=sel.map(function(k){{
-        var avg=k==='SITE'?grandAvg:(mAvgs[k]||0);
-        var col=avg>=75?'#22c55e':avg>=50?'#f59e0b':'#ef4444';
-        return '<td><b style="color:'+col+'">'+avg+'%</b></td>';
-      }}).join('');
-      tb.innerHTML=
-        '<table class="stats-table"><thead><tr><th>Period</th>'+hdr+'</tr></thead>'+
-        '<tbody><tr><td><b>'+periodStr+'</b></td>'+cells+'</tr></tbody></table>';
-    }}
   }}
 
   window.initToday=initToday;
   window.updatePeriodChart=updatePeriodChart;
   window.setRange=function(n){{
     var to=new Date(),from=new Date();from.setDate(to.getDate()-n+1);
-    document.getElementById('stat-from').value=from.toISOString().slice(0,10);
-    document.getElementById('stat-to').value=to.toISOString().slice(0,10);
+    document.getElementById('stat-from').value=isoToEu(from.toISOString().slice(0,10));
+    document.getElementById('stat-to').value=isoToEu(to.toISOString().slice(0,10));
     updatePeriodChart();
   }};
   // Scroll-to-top
   var stBtn=document.getElementById('scroll-top');
   if(stBtn) window.addEventListener('scroll',function(){{stBtn.classList.toggle('visible',window.scrollY>400);}});
+}})();
+
+// ── Batch Gantt ──────────────────────────────────────────────────
+(function(){{
+  var RAW_ALL={_cdata_js};
+  var progList=[],progColor={{}};
+  var PALETTE=['#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#f97316','#ec4899','#84cc16','#14b8a6'];
+  RAW_ALL.forEach(function(c){{
+    if(progList.indexOf(c.p)===-1){{progList.push(c.p);progColor[c.p]=PALETTE[(progList.length-1)%PALETTE.length];}}
+  }});
+
+  var ROW_H=32, PAD=4, LABEL_W=0, TICK_H=22;
+  var PX_PER_DAY=28;
+  var cv=document.getElementById('batchGantt');
+  var tip=document.getElementById('batch-tooltip');
+  var barMeta=[], gapMeta=[], CDATA=[], machines=[], dates=[];
+
+  function buildFromRange(from, to, forcedW){{
+    // Filter RAW_ALL by date range
+    var raw=RAW_ALL.filter(function(c){{return (!from||c.d>=from)&&(!to||c.d<=to);}});
+    // Session-based grouping: merge consecutive cycles of the same program
+    // into one block if the gap between end of previous and start of next is ≤SESSION_GAP min.
+    // Cycles with gaps > SESSION_GAP become separate blocks (separate production runs).
+    var SESSION_GAP=60;
+    var sorted=raw.slice().sort(function(a,b){{
+      if(a.d!==b.d) return a.d<b.d?-1:1;
+      if(a.m!==b.m) return a.m<b.m?-1:1;
+      return (a.s||'')<(b.s||'')?-1:1;
+    }});
+    CDATA=[];
+    var sessMap={{}};
+    sorted.forEach(function(c){{
+      var key=c.m+'|'+c.d+'|'+c.p;
+      var sess=sessMap[key];
+      if(sess&&c.s){{
+        var canExtend=false;
+        if(!sess.e){{canExtend=true;}}
+        else{{
+          var eh2=parseInt(sess.e.split(':')[0]),em2=parseInt(sess.e.split(':')[1]||0);
+          var sh2=parseInt(c.s.split(':')[0]),sm2=parseInt(c.s.split(':')[1]||0);
+          var gap=(sh2*60+sm2)-(eh2*60+em2);
+          canExtend=(gap>=0&&gap<=SESSION_GAP);
+        }}
+        if(canExtend){{
+          if(c.e&&(!sess.e||c.e>sess.e)) sess.e=c.e;
+          sess.dur=(sess.dur||0)+(c.dur||0);
+          return;
+        }}
+      }}
+      var ns={{d:c.d,m:c.m,p:c.p,s:c.s,e:c.e,dur:c.dur||0}};
+      CDATA.push(ns);
+      sessMap[key]=ns;
+    }});
+    CDATA.sort(function(a,b){{return a.d<b.d?-1:a.d>b.d?1:0;}});
+    machines=[];
+    CDATA.forEach(function(c){{
+      if(machines.indexOf(c.m)===-1)machines.push(c.m);
+    }});
+    machines.sort();
+    // Generate ALL dates in range (not just dates with data) so columns
+    // match the Period Trend chart which shows every date in the range
+    dates=[];
+    if(from&&to){{
+      var cur=new Date(from+'T00:00:00');
+      var end=new Date(to+'T00:00:00');
+      while(cur<=end){{
+        dates.push(cur.toISOString().slice(0,10));
+        cur.setDate(cur.getDate()+1);
+      }}
+    }} else {{
+      var dateSet={{}};
+      CDATA.forEach(function(c){{dateSet[c.d]=1;}});
+      dates=Object.keys(dateSet).sort();
+    }}
+    // Compute PX_PER_DAY from Period Trend chart-wrap width (forcedW passed directly avoids offsetWidth timing issues)
+    if(dates.length){{
+      var _availW=forcedW||0;
+      if(!_availW){{var _chartEl=document.getElementById('effChartPeriod');var _cw=_chartEl?_chartEl.closest('.chart-wrap'):null;_availW=(_cw&&_cw.offsetWidth>0)?_cw.offsetWidth:0;}}
+      if(!_availW)_availW=Math.max(600,dates.length*22+60);
+      PX_PER_DAY=_availW/Math.max(dates.length,1);
+    }}
+  }}
+
+  function drawGantt(forcedW){{
+    if(!dates.length){{ cv.style.width='0'; cv.style.height='0'; return; }}
+    var canvasW=forcedW||0;
+    if(!canvasW){{var _chartEl=document.getElementById('effChartPeriod');var _cw2=_chartEl?_chartEl.closest('.chart-wrap'):null;canvasW=(_cw2&&_cw2.offsetWidth>0)?_cw2.offsetWidth:0;}}
+    if(!canvasW)canvasW=Math.max(600,dates.length*22+60);
+    // Sync Gantt chart-wrap width to match Period Trend exactly
+    var _gcw=cv.closest('.chart-wrap');
+    if(_gcw){{_gcw.style.minWidth=canvasW+'px';_gcw.style.width=canvasW+'px';}}
+    var canvasH=350;
+    if(machines.length>0){{ROW_H=Math.max(14,Math.floor((canvasH-TICK_H-PAD*(machines.length+1))/machines.length));}}
+    var dpr=window.devicePixelRatio||1;
+    cv.style.width=canvasW+'px'; cv.style.height=canvasH+'px';
+    cv.width=Math.round(canvasW*dpr); cv.height=Math.round(canvasH*dpr);
+    var ctx=cv.getContext('2d'); ctx.scale(dpr,dpr);
+    barMeta=[];
+
+    ctx.fillStyle='#f8fafc'; ctx.fillRect(0,0,canvasW,canvasH);
+
+    dates.forEach(function(d,i){{
+      var x=LABEL_W+i*PX_PER_DAY;
+      var dow=new Date(d+'T00:00:00').getDay();
+      if(dow===0||dow===6){{
+        ctx.fillStyle='rgba(255,180,0,0.18)';
+        ctx.fillRect(x,0,PX_PER_DAY,canvasH-TICK_H);
+      }} else {{
+        // Non-working hours: darker gray
+        ctx.fillStyle='rgba(100,116,139,0.18)';
+        if(dow===1||dow===5){{
+          ctx.fillRect(x,0,Math.round(7/24*PX_PER_DAY),canvasH-TICK_H);
+          ctx.fillRect(x+Math.round(19/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(19/24*PX_PER_DAY),canvasH-TICK_H);
+        }} else {{
+          ctx.fillRect(x,0,Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
+        }}
+        // Working hours idle: red background (program bars will cover it)
+        ctx.fillStyle='rgba(239,68,68,0.10)';
+        if(dow===1||dow===5){{
+          var iwx1=Math.round(7/24*PX_PER_DAY),iwx2=Math.round(19/24*PX_PER_DAY);
+          ctx.fillRect(x+iwx1,0,iwx2-iwx1,canvasH-TICK_H);
+        }}else{{
+          ctx.fillRect(x+Math.round(6.5/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
+        }}
+      }}
+      ctx.strokeStyle='#475569'; ctx.lineWidth=1.5; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,canvasH-TICK_H); ctx.stroke();
+      var step=PX_PER_DAY>=28?1:Math.ceil(28/PX_PER_DAY);
+      if(i%step===0){{
+        ctx.fillStyle='#64748b'; ctx.font='10px sans-serif'; ctx.textAlign='center';
+        ctx.fillText(d.slice(8)+'.'+d.slice(5,7), x+PX_PER_DAY/2, canvasH-6);
+      }}
+    }});
+
+    machines.forEach(function(m,ri){{
+      var y=PAD+ri*(ROW_H+PAD);
+      ctx.strokeStyle='#e2e8f0'; ctx.lineWidth=1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(0,y+ROW_H+PAD/2); ctx.lineTo(canvasW,y+ROW_H+PAD/2); ctx.stroke();
+    }});
+
+    // ── Collect gap metadata (idle between programs, same machine+day) ─
+    var byMD={{}};
+    CDATA.forEach(function(c){{
+      var k=c.m+'|'+c.d;
+      if(!byMD[k])byMD[k]=[];
+      byMD[k].push(c);
+    }});
+    gapMeta=[];
+    Object.keys(byMD).forEach(function(k){{
+      var items=byMD[k].slice().sort(function(a,b){{return (a.s||'')<(b.s||'')?-1:1;}});
+      var parts=k.split('|'), m=parts[0], d=parts[1];
+      var ri=machines.indexOf(m), di=dates.indexOf(d);
+      if(ri===-1||di===-1) return;
+      var x=LABEL_W+di*PX_PER_DAY;
+      var y=PAD+ri*(ROW_H+PAD);
+      for(var i=0;i<items.length-1;i++){{
+        var cur=items[i],nxt=items[i+1];
+        if(!cur.e||!nxt.s) continue;
+        var ceh=parseInt(cur.e.split(':')[0]),cem=parseInt(cur.e.split(':')[1]||0);
+        var nsh=parseInt(nxt.s.split(':')[0]),nsm=parseInt(nxt.s.split(':')[1]||0);
+        var gapMin=(nsh*60+nsm)-(ceh*60+cem);
+        if(gapMin<15) continue;
+        var gx=x+Math.round((ceh*60+cem)/1440*PX_PER_DAY);
+        var gex=x+Math.round((nsh*60+nsm)/1440*PX_PER_DAY);
+        var gw=Math.max(gex-gx,2);
+        gapMeta.push({{x:gx,y:y+3,w:gw,h:ROW_H-6,gapMin:gapMin,m:m,d:d,s:cur.e,e:nxt.s}});
+      }}
+    }});
+
+    // ── Program bars ─────────────────────────────────────────────────
+    CDATA.forEach(function(c){{
+      var ri=machines.indexOf(c.m); if(ri===-1) return;
+      var di=dates.indexOf(c.d); if(di===-1) return;
+      var x=LABEL_W+di*PX_PER_DAY;
+      var sh=c.s?parseInt(c.s.split(':')[0]):0, sm=c.s?parseInt(c.s.split(':')[1]||0):0;
+      var eh=c.e?parseInt(c.e.split(':')[0]):0, em=c.e?parseInt(c.e.split(':')[1]||0):0;
+      var bx=x+Math.round((sh*60+sm)/1440*PX_PER_DAY);
+      var ex=x+Math.round((eh*60+em)/1440*PX_PER_DAY);
+      var bw=Math.max(ex-bx,4);
+      var y=PAD+ri*(ROW_H+PAD);
+      ctx.fillStyle=progColor[c.p]||'#94a3b8';
+      ctx.beginPath(); ctx.roundRect(bx,y+3,bw,ROW_H-6,3); ctx.fill();
+      if(bw>36){{
+        ctx.fillStyle='rgba(255,255,255,0.92)';
+        ctx.font='bold 9px sans-serif'; ctx.textAlign='left';
+        ctx.save(); ctx.beginPath(); ctx.rect(bx+2,y+3,bw-4,ROW_H-6); ctx.clip();
+        ctx.fillText(c.p,bx+5,y+ROW_H/2+3);
+        ctx.restore();
+      }}
+      barMeta.push({{x:bx,y:y+3,w:bw,h:ROW_H-6,c:c}});
+    }});
+
+    // ── Gap duration labels (drawn on top of bars) ────────────────────
+    gapMeta.forEach(function(g){{
+      if(g.w>32){{
+        var txt=g.gapMin>=60?(Math.floor(g.gapMin/60)+'h'+(g.gapMin%60?g.gapMin%60+'m':'')):(g.gapMin+'m');
+        ctx.fillStyle='rgba(220,38,38,0.85)';
+        ctx.font='bold 9px sans-serif'; ctx.textAlign='center';
+        ctx.fillText(txt,g.x+g.w/2,g.y+g.h/2+3);
+      }}
+    }});
+  }}
+
+  // Initial draw: last 7 days
+  (function(){{
+    var to=new Date(),from=new Date();from.setDate(to.getDate()-6);
+    buildFromRange(from.toISOString().slice(0,10), to.toISOString().slice(0,10));
+    drawGantt();
+  }})();
+
+  // Exposed so Period Trend controls can sync this chart
+  window.updateBatchGantt=function(from,to,forcedW){{
+    buildFromRange(from,to,forcedW);
+    drawGantt(forcedW);
+  }};
+
+  // Tooltip
+  cv.addEventListener('mousemove',function(e){{
+    var rect=cv.getBoundingClientRect();
+    var scaleX=parseFloat(cv.style.width)/rect.width;
+    var mx=(e.clientX-rect.left)*scaleX, my=(e.clientY-rect.top)*scaleX;
+    // Check program bars first
+    var found=null;
+    for(var i=barMeta.length-1;i>=0;i--){{
+      var b=barMeta[i];
+      if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){{found=b;break;}}
+    }}
+    if(found){{
+      tip.style.display='block';
+      tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px';
+      var dm=found.c.dur?Math.round(found.c.dur):0;
+      var durStr=dm>0?(dm>=60?(Math.floor(dm/60)+'h'+(dm%60?'\u00a0'+dm%60+'m':'')):dm+'\u00a0min'):'';
+      tip.innerHTML='<b>'+found.c.m+'</b> — '+found.c.p+'<br>'+found.c.d+'&nbsp;'+found.c.s+'–'+found.c.e+(durStr?'<br>'+durStr:'');
+      return;
+    }}
+    // Check gap bars
+    var foundGap=null;
+    for(var j=gapMeta.length-1;j>=0;j--){{
+      var g=gapMeta[j];
+      if(mx>=g.x&&mx<=g.x+g.w&&my>=g.y&&my<=g.y+g.h){{foundGap=g;break;}}
+    }}
+    if(foundGap){{
+      tip.style.display='block';
+      tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px';
+      var h=Math.floor(foundGap.gapMin/60),m2=foundGap.gapMin%60;
+      var durStr=h>0?(h+'h '+(m2?m2+'m':'')):m2+'m';
+      tip.innerHTML='⏸ <b>Idle: '+durStr+'</b><br>'+foundGap.m+' &nbsp;'+foundGap.d+'<br>'+foundGap.s+' – '+foundGap.e;
+    }} else tip.style.display='none';
+  }});
+  cv.addEventListener('mouseleave',function(){{tip.style.display='none';}});
 }})();
 
 // ── Nav drawer (mobile) ───────────────────────────────────────────
