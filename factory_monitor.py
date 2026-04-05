@@ -2788,8 +2788,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         var selM=sel.filter(function(m){{return m!=='SITE';}});
         data=labels.map(function(l){{
           if(!selM.length) return null;
-          var vals=selM.map(function(m){{return getFn(m,l);}}).filter(function(v){{return v!=null;}});
-          return vals.length?Math.round(vals.reduce(function(a,b){{return a+b;}},0)/vals.length):null;
+          var sum=selM.reduce(function(s,m){{var v=getFn(m,l);return s+(v!=null?v:0);}},0);
+          return Math.round(sum/selM.length);
         }});
       }}else{{
         data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:null;}});
@@ -2873,6 +2873,17 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       if(!c) return;
       var ctx2=chart.ctx;
       ctx2.save();ctx2.fillStyle='#f8fafc';ctx2.fillRect(0,0,chart.width,chart.height);ctx2.restore();
+      // Horizontal percentage grid lines (10%…100%)
+      var yS2=chart.scales.y;
+      [0,10,20,30,40,50,60,70,80,90,100].forEach(function(pct){{
+        var yPx=yS2.getPixelForValue(pct);
+        ctx2.save();
+        ctx2.strokeStyle='rgba(100,116,139,0.18)';ctx2.lineWidth=1;ctx2.setLineDash([]);
+        ctx2.beginPath();ctx2.moveTo(0,yPx);ctx2.lineTo(chart.width,yPx);ctx2.stroke();
+        ctx2.fillStyle='rgba(100,116,139,0.5)';ctx2.font='9px sans-serif';ctx2.textAlign='left';
+        ctx2.fillText(pct+'%',3,yPx-2);
+        ctx2.restore();
+      }});
       var labels=chart.data.labels,n=labels.length;if(n<2)return;
       var step=xScale.getPixelForValue(1)-xScale.getPixelForValue(0);
       // Weekend shading + SAT/SUN label + day separator lines
@@ -2916,8 +2927,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
         if(gi>0){{
           var prev=weeks[gi-1][1];
           var sepX=(xScale.getPixelForValue(idxs[0])+xScale.getPixelForValue(prev[prev.length-1]))/2;
-          ctx2.strokeStyle='rgba(80,80,180,0.35)';ctx2.lineWidth=1;
-          ctx2.setLineDash([4,3]);ctx2.beginPath();
+          ctx2.strokeStyle='rgba(80,80,180,0.55)';ctx2.lineWidth=3;
+          ctx2.setLineDash([6,3]);ctx2.beginPath();
           ctx2.moveTo(sepX,0);ctx2.lineTo(sepX,chart.height);ctx2.stroke();
         }}
         ctx2.restore();
@@ -3000,6 +3011,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       if(_wrap)_wrap.style.width=_actualW+'px';
       if(pCh)pCh.resize(_actualW,350);
       if(window.updateBatchGantt)window.updateBatchGantt(from,to,_actualW);
+      // Auto-scroll both panels to end when content overflows
+      var _pSc=ctx.closest('.chart-scroll-outer');
+      var _gSc=document.getElementById('gantt-scroll-outer');
+      if(_pSc&&_pSc.scrollWidth>_pSc.clientWidth){{_pSc.scrollLeft=_pSc.scrollWidth;}}
+      if(_gSc&&_gSc.scrollWidth>_gSc.clientWidth){{_gSc.scrollLeft=_gSc.scrollWidth;}}
     }});
     leg('legend-period',d2);
   }}
@@ -3285,6 +3301,16 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 }})();
 
 document.addEventListener('DOMContentLoaded',function(){{
+  // Scroll sync: Period Trend ↔ Batch Gantt
+  (function(){{
+    var pEl=document.getElementById('effChartPeriod');
+    var pSc=pEl?pEl.closest('.chart-scroll-outer'):null;
+    var gSc=document.getElementById('gantt-scroll-outer');
+    if(!pSc||!gSc) return;
+    var _sy=false;
+    pSc.addEventListener('scroll',function(){{if(_sy)return;_sy=true;gSc.scrollLeft=pSc.scrollLeft;_sy=false;}});
+    gSc.addEventListener('scroll',function(){{if(_sy)return;_sy=true;pSc.scrollLeft=gSc.scrollLeft;_sy=false;}});
+  }})();
   setTimeout(function(){{requestAnimationFrame(function(){{
     if(window.initToday) window.initToday();
     if(window.setRange)  window.setRange(7);
