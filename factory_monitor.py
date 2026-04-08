@@ -2495,8 +2495,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     z-index:1600;align-items:center;justify-content:center;
     box-shadow:2px 0 8px rgba(0,0,0,.35);
   }}
-  .nav-btn{{display:block;padding:8px 14px;font-size:0.82rem;white-space:nowrap;border-radius:6px;width:100%;text-align:left;background:#1e293b;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:background .15s}}
-  .nav-btn:hover{{background:#3b82f6}}
+  .nav-btn{{display:block;padding:14px 10px;font-size:1.1rem;white-space:nowrap;border-radius:10px;width:100%;text-align:center;background:#1e293b;color:#fff;font-weight:800;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,0.35);transition:background .15s,box-shadow .15s;letter-spacing:0.04em}}
+  .nav-btn:hover{{background:#3b82f6;box-shadow:0 4px 14px rgba(59,130,246,0.4)}}
   .nav-tab-btn{{background:#1450CF!important;color:#fff!important}}
   .nav-tab-btn.active{{background:#3b82f6!important;box-shadow:0 0 0 2px #fff}}
   /* scroll top */
@@ -2586,6 +2586,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 <div class="footer">Source: {CSV_FILE} &nbsp;|&nbsp; DB: {DB_FILE}</div>
 <div id="tl-tooltip"></div>
 <script>
+function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();return y+'-'+(m<10?'0':'')+m+'-'+(dd<10?'0':'')+dd;}}
 (function(){{
   var tip = document.getElementById("tl-tooltip");
 
@@ -2809,6 +2810,13 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     interaction:{{mode:'index',intersect:false}},
     plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return c.dataset.label+': '+(c.parsed.y!=null?c.parsed.y+'%':'—');}}}}}}  }},
     scales:{{y:{{display:false,min:-5,max:100,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:false}}}},x:{{display:false,offset:true,ticks:{{maxRotation:45}},grid:{{display:false}}}}}}}};}}
+  function optsToday(){{
+    var o=opts();
+    o.scales.y={{display:true,min:0,max:100,ticks:{{callback:function(v){{return v+'%';}},stepSize:10}},grid:{{color:'rgba(100,116,139,0.15)'}}}};
+    o.scales.x={{display:true,offset:true,ticks:{{maxRotation:0,color:'#475569',font:{{size:11}}}},grid:{{display:false}}}};
+    o.layout={{padding:{{left:4,right:12,top:4,bottom:4}}}};
+    return o;
+  }}
   function leg(id,ds2){{
     var el=document.getElementById(id);if(!el)return;
     el.innerHTML=ds2.map(function(d,i){{
@@ -2818,16 +2826,18 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   }}
 
   function initToday(){{
-    var tod=new Date().toISOString().slice(0,10);
+    var _now=new Date();
+    var tod=localISO(_now);
     var hd=HDATA[tod]||{{}};
     var hs=new Set();
     Object.values(hd).forEach(function(m){{Object.keys(m).forEach(function(h){{hs.add(parseInt(h));}});}});
+    hs.add(_now.getHours()); // завжди включаємо поточну годину
     var hours=Array.from(hs).sort(function(a,b){{return a-b;}});
     var labels=hours.map(function(h){{return (h<10?'0':'')+h+':00';}});
     var d2=ds(labels,function(k,lbl){{var h=parseInt(lbl);return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:0;}});
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
-    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:opts()}});
+    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday()}});
     requestAnimationFrame(function(){{tCh.resize();var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-today',d2);
     var ttb=document.getElementById('today-table-wrap');
@@ -2948,7 +2958,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     // have identical column counts — required for x-axis alignment
     var dates=[];
     {{var _c=new Date(from+'T00:00:00'),_e=new Date(to+'T00:00:00');
-      while(_c<=_e){{dates.push(_c.toISOString().slice(0,10));_c.setDate(_c.getDate()+1);}}}}
+      while(_c<=_e){{dates.push(localISO(_c));_c.setDate(_c.getDate()+1);}}}}
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
     var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
     // Weekly average curve
@@ -3028,8 +3038,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   window.updatePeriodChart=updatePeriodChart;
   window.setRange=function(n){{
     var to=new Date(),from=new Date();from.setDate(to.getDate()-n+1);
-    document.getElementById('stat-from').value=isoToEu(from.toISOString().slice(0,10));
-    document.getElementById('stat-to').value=isoToEu(to.toISOString().slice(0,10));
+    document.getElementById('stat-from').value=isoToEu(localISO(from));
+    document.getElementById('stat-to').value=isoToEu(localISO(to));
     updatePeriodChart();
   }};
   // Scroll-to-top
@@ -3107,7 +3117,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       var cur=new Date(from+'T00:00:00');
       var end=new Date(to+'T00:00:00');
       while(cur<=end){{
-        dates.push(cur.toISOString().slice(0,10));
+        dates.push(localISO(cur));
         cur.setDate(cur.getDate()+1);
       }}
     }} else {{
@@ -3148,6 +3158,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
       if(dow===0||dow===6){{
         ctx.fillStyle='rgba(255,180,0,0.18)';
         ctx.fillRect(x,0,PX_PER_DAY,canvasH-TICK_H);
+        ctx.save();ctx.fillStyle='rgba(180,100,0,0.6)';ctx.font='bold 10px sans-serif';ctx.textAlign='center';
+        ctx.fillText(dow===6?'SAT':'SUN',x+PX_PER_DAY/2,11);ctx.restore();
       }} else {{
         // Non-working hours: dark gray fill
         // Mon(1): dark 0-7h, 19-24h
@@ -3183,7 +3195,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           ctx.fillRect(x+Math.round(6.5/24*PX_PER_DAY),0,PX_PER_DAY-Math.round(6.5/24*PX_PER_DAY),canvasH-TICK_H);
         }}
       }}
-      ctx.strokeStyle='#475569'; ctx.lineWidth=1.5; ctx.setLineDash([]);
+      ctx.strokeStyle='#475569'; ctx.lineWidth=1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,canvasH-TICK_H); ctx.stroke();
       var step=PX_PER_DAY>=28?1:Math.ceil(28/PX_PER_DAY);
       if(i%step===0){{
@@ -3195,13 +3207,13 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     // ── Machine separator lines + name overlay ────────────────────────
     machines.forEach(function(m,ri){{
       var y=PAD+ri*(ROW_H+PAD);
-      // Separator line — bold solid
-      ctx.strokeStyle='#334155'; ctx.lineWidth=2; ctx.setLineDash([]);
+      // Separator line
+      ctx.strokeStyle='#475569'; ctx.lineWidth=1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(0,y+ROW_H+PAD/2); ctx.lineTo(canvasW,y+ROW_H+PAD/2); ctx.stroke();
       // Machine name as text overlay (top-left of each row)
       var shortM=m.indexOf('_')!==-1?m.split('_')[0]:m;
       ctx.save();
-      ctx.font='bold 11px sans-serif'; ctx.textAlign='left';
+      ctx.font='bold 16px sans-serif'; ctx.textAlign='left';
       ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=4;
       ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.6)';
       ctx.strokeText(shortM,6,y+ROW_H/2+4);
@@ -3269,7 +3281,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   // Initial draw: last 7 days
   (function(){{
     var to=new Date(),from=new Date();from.setDate(to.getDate()-6);
-    buildFromRange(from.toISOString().slice(0,10), to.toISOString().slice(0,10));
+    buildFromRange(localISO(from), localISO(to));
     drawGantt();
   }})();
 
