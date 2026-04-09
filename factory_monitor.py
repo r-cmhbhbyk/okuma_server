@@ -702,10 +702,11 @@ def save_to_db(conn, date_str, cycles, downtimes):
     for mname in cycles:
         c_list    = cycles[mname]
         d_data    = downtimes[mname]
-        run_min   = d_data["total_run"]
+        run_min   = d_data.get("total_run_all", d_data["total_run"])  # all hours, for SITE calc
         down_min  = d_data["total_down"]
         total_min = _work_window_min(date_str)
-        eff       = round(run_min / total_min * 100, 1) if total_min else 0
+        run_min_working = d_data["total_run"]  # working hours only
+        eff       = round(run_min_working / total_min * 100, 1) if total_min else 0
         avg_cycle = round(sum(c["duration"] for c in c_list) / len(c_list), 1) if c_list else 0
         conn.execute("""
             INSERT OR REPLACE INTO daily_summary
@@ -1106,9 +1107,10 @@ def analyze_downtime(rows):
 
         result[mname] = {
             "downtimes":  downtimes,
-            "total_run":  sum(1 for r in mrows if r["RunState"] == "1"),
+            "total_run":  sum(1 for r in filtered_rows if r["RunState"] == "1"),
             "total_down": sum(1 for r in filtered_rows if r["RunState"] == "0"),
             "total_min":  len(filtered_rows),
+            "total_run_all": sum(1 for r in mrows if r["RunState"] == "1"),
         }
     return result
 
@@ -1446,13 +1448,22 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
             by_prog[prog_name].append(c)
 
         for prog, prog_cycles in by_prog.items():
-            # Розраховуємо Calculated — спочатку cycle_time, потім duration
-            cycle_times = [c["cycle_time"] for c in prog_cycles if c.get("cycle_time") and c["cycle_time"] > 0]
-            if cycle_times:
-                calc_target = calculate_real_cycle_time(cycle_times)
+            # Розраховуємо Calculated — повний час блоку (run + setup) = start-to-start
+            sorted_pc = sorted(prog_cycles, key=lambda c: c["start"])
+            block_times = []
+            for idx_c, cc in enumerate(sorted_pc):
+                if idx_c + 1 < len(sorted_pc) and cc.get("start") and sorted_pc[idx_c + 1].get("start"):
+                    bt = round((sorted_pc[idx_c + 1]["start"] - cc["start"]).total_seconds() / 60, 2)
+                    if bt > 0:
+                        block_times.append(bt)
+                else:
+                    ct = cc.get("cycle_time") or cc.get("duration", 0)
+                    if ct and ct > 0:
+                        block_times.append(ct)
+            if block_times:
+                calc_target = calculate_real_cycle_time(block_times)
             else:
-                cycle_durs = [c["duration"] for c in prog_cycles if c.get("duration", 0) > 0]
-                calc_target = calculate_real_cycle_time(cycle_durs) if cycle_durs else None
+                calc_target = None
 
             if calc_target is None:
                 continue
@@ -1744,6 +1755,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 if not _s:
                     continue  # skip records without valid start time (renders at 00:00)
                 _e = _r[4] if _r[4] and _r[4] != "—" else None
+                if not _e:
+                    # Ongoing cycle: was still running when script analyzed this day
+                    # → extend to end of day so cross-midnight merge works
+                    _e = "23:59"
                 _cdata.append({
                     "d": _r[0],
                     "m": (_r[1].split("_")[0] if "_" in _r[1] else _r[1]),
@@ -1847,117 +1862,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             f'{ticks_js}'
             f'</div>')
 
-    def history_chart(mname):
-        rows_h = load_history(conn, mname)
-        if not rows_h:
-            return ""
-        cid    = mname.replace(" ", "_").replace("-", "_")
-        short  = mname.split("_")[0] if "_" in mname else mname
-        labels = json.dumps([f"{r[0][8:10]}.{r[0][5:7]}" for r in rows_h])
-        eff    = json.dumps([r[1] if r[1] is not None else 0 for r in rows_h])
-        _day_names = {5: "SAT", 6: "SUN"}
-        weekend_map = json.dumps({
-            str(i): _day_names[datetime.strptime(r[0], "%Y-%m-%d").weekday()]
-            for i, r in enumerate(rows_h)
-            if datetime.strptime(r[0], "%Y-%m-%d").weekday() >= 5
-        })
-        _week_groups: dict = {}
-        for i, r in enumerate(rows_h):
-            wn = datetime.strptime(r[0], "%Y-%m-%d").isocalendar()[1]
-            _week_groups.setdefault(wn, []).append(i)
-        week_labels = json.dumps([
-            {"week": wn, "indices": idxs}
-            for wn, idxs in sorted(_week_groups.items())
-        ])
-        return f'''
-        <div class="section-title">📈 7-Day History</div>
-        <div style="padding:8px 20px 16px">
-          <div style="position:relative;height:140px">
-            <canvas id="chart_{cid}"></canvas>
-          </div>
-        </div>
-        <script>
-        (function(){{
-          const weekendPlugin_{cid} = {{
-            id:"weekendBg_{cid}",
-            beforeDraw(chart){{
-              const {{ctx,chartArea,scales}} = chart;
-              if(!chartArea) return;
-              const xScale = scales.x;
-              const wMap = {weekend_map};
-              const wks  = {week_labels};
-              const n = chart.data.labels.length;
-              const step = n > 1 ? (xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) : xScale.width;
-              // weekend shading + SAT/SUN labels at top
-              Object.entries(wMap).forEach(([i, label])=>{{
-                const cx = xScale.getPixelForValue(Number(i));
-                ctx.save();
-                ctx.fillStyle = "rgba(255,180,0,0.13)";
-                ctx.fillRect(cx - step/2, chartArea.top, step, chartArea.height);
-                ctx.fillStyle = "rgba(180,100,0,0.6)";
-                ctx.font = "bold 10px sans-serif";
-                ctx.textAlign = "center";
-                ctx.fillText(label, cx, chartArea.top + 11);
-                ctx.restore();
-              }});
-              // week number labels at bottom + separator lines between weeks
-              wks.forEach((g, gi)=>{{
-                const idxs = g.indices;
-                const avgX = idxs.reduce((s,i)=>s+xScale.getPixelForValue(i),0)/idxs.length;
-                ctx.save();
-                ctx.fillStyle = "rgba(80,80,180,0.75)";
-                ctx.font = "bold 10px sans-serif";
-                ctx.textAlign = "center";
-                ctx.fillText("W"+g.week, avgX, chartArea.bottom - 4);
-                // dashed separator before this week group (except first)
-                if(gi > 0){{
-                  const sepX = (xScale.getPixelForValue(idxs[0]) + xScale.getPixelForValue(wks[gi-1].indices[wks[gi-1].indices.length-1])) / 2;
-                  ctx.strokeStyle = "rgba(80,80,180,0.35)";
-                  ctx.lineWidth = 1;
-                  ctx.setLineDash([4,3]);
-                  ctx.beginPath();
-                  ctx.moveTo(sepX, chartArea.top);
-                  ctx.lineTo(sepX, chartArea.bottom);
-                  ctx.stroke();
-                }}
-                ctx.restore();
-              }});
-            }}
-          }};
-          new Chart(document.getElementById("chart_{cid}").getContext("2d"),{{
-            type:"line",
-            plugins:[weekendPlugin_{cid}],
-            data:{{labels:{labels},datasets:[{{
-              label:"{short}",
-              data:{eff},
-              borderColor:"#3b82f6",
-              backgroundColor:"#3b82f622",
-              tension:0.3,
-              pointRadius:5,
-              pointHoverRadius:7,
-              borderWidth:2,
-              fill:false,
-              spanGaps:false
-            }}]}},
-            options:{{
-              responsive:true,
-              maintainAspectRatio:false,
-              interaction:{{mode:"index",intersect:false}},
-              plugins:{{
-                legend:{{display:false}},
-                tooltip:{{callbacks:{{label:function(c){{return c.dataset.label+": "+c.parsed.y+"%";}}}}}}
-              }},
-              scales:{{
-                y:{{min:-5,max:100,
-                   ticks:{{callback:function(v){{return v<0?"":v+"%";}}}},
-                   title:{{display:true,text:"Efficiency"}}}},
-                x:{{ticks:{{maxRotation:45}}}}
-              }}
-            }}
-          }});
-        }})();
-        </script>'''
-
     def activity_section(c_list, d_list, mname):
         """Об'єднана таблиця циклів та простоїв, відсортована за часом"""
         segs = timeline_data.get(mname, [])
@@ -1990,17 +1894,9 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                     return s["id"]
             return ""
         
-        # Маркери (фіолетові лінії) для цієї машини — відсортовані
-        machine_markers = sorted(counter_markers.get(mname, []))
-        # prog_markers: {datetime: prog} — для start-to-start маркерів
-        prog_markers = counter_markers.get(f"__prog_{mname}", {})
-        # green_durs: {datetime: float} — тривалість зеленого сектору після маркера
-        green_durs = counter_markers.get(f"__green_{mname}", {})
-
         # Об'єднуємо всі події
         events = []
 
-        # Додаємо цикли (COUNTER.MIN не показуємо)
         for c in c_list:
             if c.get("program", "").upper().startswith("COUNTER"):
                 continue
@@ -2016,7 +1912,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 "ids": find_cycle_ids(c)
             })
 
-        # Додаємо простої
         for d in d_list:
             events.append({
                 "type": "downtime",
@@ -2028,88 +1923,43 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 "ids": find_down_id(d)
             })
 
-        # Сортуємо за часом
         events.sort(key=lambda e: e["start"])
-
-        # Вставляємо маркери-розділювачі між подіями.
-        # Маркер несе block_dur = час від ЦЬОГО маркера до НАСТУПНОГО (або до кінця останньої події).
-        # Це дозволяє показати час циклу в блоці подій що ПІСЛЯ маркера.
-        if machine_markers:
-            # Права межа кожного блоку = наступний маркер або кінець останньої події
-            last_event_end = None
-            for e in reversed(events):
-                if e.get("end"):
-                    last_event_end = e["end"]
-                    break
-            # Для start-to-start маркерів block_dur = до наступного маркера тієї ж програми
-            # Для COUNTER маркерів block_dur = до наступного маркера (будь-якого)
-            marker_events = []
-            for i, mk in enumerate(machine_markers):
-                mk_prog = prog_markers.get(mk)  # None якщо це COUNTER маркер
-                if mk_prog is not None:
-                    # start-to-start: Cycle = тривалість зеленого сектору після цього маркера
-                    blk_dur = green_durs.get(mk)  # green_dur збережений при генерації маркера
-                else:
-                    # COUNTER маркер: наступний маркер будь-якого типу
-                    right = machine_markers[i+1] if i+1 < len(machine_markers) else last_event_end
-                    blk_dur = round((right - mk).total_seconds() / 60, 2) if right and right > mk else None
-                marker_events.append({
-                    "type":        "marker",
-                    "start":       mk,
-                    "block_start": mk,
-                    "block_dur":   blk_dur,
-                    "block_prog":  mk_prog,
-                })
-
-            combined = []
-            marker_idx = 0
-            for e in events:
-                while marker_idx < len(marker_events):
-                    mk_ev = marker_events[marker_idx]
-                    if mk_ev["start"] <= e["start"]:
-                        combined.append(mk_ev)
-                        marker_idx += 1
-                    else:
-                        break
-                combined.append(e)
-            while marker_idx < len(marker_events):
-                combined.append(marker_events[marker_idx])
-                marker_idx += 1
-            events = combined
 
         if not events:
             return '<p class="empty">No activity detected</p>'
-        
-        # Генеруємо рядки таблиці
-        # Групуємо події по блоках (між маркерами) для rowspan колонки Cycle.
-        # Маркер = розділювач перед блоком. marker.block_dur = час цього блоку.
-        blocks = []
-        current_block = []
-        current_marker = None
-        for e in events:
-            if e["type"] == "marker":
-                # Зберігаємо попередній блок (без маркера або зі своїм маркером)
-                if current_block:
-                    blocks.append({"events": current_block, "marker": current_marker})
-                current_block = []
-                current_marker = e  # маркер для НАСТУПНОГО блоку
-            else:
-                current_block.append(e)
-        if current_block or current_marker:
-            blocks.append({"events": current_block, "marker": current_marker})
 
-        # Якщо маркерів немає — один блок без маркера
-        if not blocks:
-            blocks = [{"events": events, "marker": None}]
+        # Групуємо: кожен зелений (цикл) + наступні червоні до наступного зеленого = один блок.
+        # Один блок = один цикл деталі: виконання програми + заміна деталі.
+        # Cycle = cycle_time зеленого рядка (start-to-start, вже розраховано).
+        blocks = []
+        i = 0
+        while i < len(events):
+            e = events[i]
+            if e["type"] == "cycle":
+                block_events = [e]
+                j = i + 1
+                while j < len(events) and events[j]["type"] != "cycle":
+                    block_events.append(events[j])
+                    j += 1
+                total_block_dur = round(sum(ev.get("duration", 0) for ev in block_events), 2)
+                blocks.append({"events": block_events, "cycle_time": total_block_dur})
+                i = j
+            else:
+                # Червоні події до першого зеленого — окремий блок без cycle
+                block_events = []
+                while i < len(events) and events[i]["type"] != "cycle":
+                    block_events.append(events[i])
+                    i += 1
+                if block_events:
+                    blocks.append({"events": block_events, "cycle_time": None})
 
         rows_html = ""
-        for blk in blocks:
+        for bi, blk in enumerate(blocks):
             blk_events = blk["events"]
-            marker = blk["marker"]
+            cycle_time = blk["cycle_time"]
             n = len(blk_events)
 
-            # Фіолетовий горизонтальний розділювач перед кожним блоком
-            if marker is not None:
+            if bi > 0:
                 rows_html += (
                     f'<tr style="height:3px;padding:0;line-height:0;">'
                     f'<td colspan="6" style="height:3px;padding:0;background:#a855f7;border:none;"></td></tr>'
@@ -2122,44 +1972,27 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                     icon = "🟢"
                     detail = e["program"] or "—"
                     row_class = "activity-run"
-                    start_s = fmt_time(e["start"])
-                    end_s = "…" if not e.get("end") else fmt_time(e["end"])
                 else:
                     icon = "🔴"
                     detail = e["reason"]
                     row_class = "activity-down"
-                    start_s = fmt_time(e["start"])
-                    end_s = "…" if not e.get("end") else fmt_time(e["end"])
 
-                # Колонка Cycle з rowspan тільки для першого рядка блоку
-                if idx == 0 and marker is not None and n > 0:
-                    mk_prog = marker.get("block_prog")
-                    first_prog = blk_events[0].get("program") if blk_events else None
-                    first_cycle_time = blk_events[0].get("cycle_time") if blk_events else None
-                    if mk_prog is not None:
-                        # start-to-start: беремо cycle_time з першого зеленого рядка блоку
-                        if mk_prog == first_prog and first_cycle_time is not None:
-                            dur_text = f"{first_cycle_time} min"
-                        else:
-                            dur_text = None
-                    else:
-                        # COUNTER маркер: block_dur з маркера
-                        dur_text = f"{marker['block_dur']} min" if marker.get("block_dur") is not None else "…"
-                    if dur_text is not None:
+                start_s = fmt_time(e["start"])
+                end_s = "…" if not e.get("end") else fmt_time(e["end"])
+
+                if idx == 0:
+                    if cycle_time is not None:
                         cycle_td = (
                             f'<td rowspan="{n}" style="'
                             f'color:#7c3aed;font-weight:700;'
                             f'text-align:center;vertical-align:middle;'
                             f'white-space:nowrap;border-left:1px solid #000;">'
-                            f'{dur_text}</td>'
+                            f'{cycle_time} min</td>'
                         )
                     else:
                         cycle_td = f'<td rowspan="{n}" style="border-left:1px solid #000;"></td>'
-                elif idx == 0 and marker is None:
-                    # Немає маркера — порожня колонка з rowspan
-                    cycle_td = f'<td rowspan="{max(n,1)}" style="border-left:1px solid #000;"></td>'
                 else:
-                    cycle_td = ""  # вже зайнято rowspan
+                    cycle_td = ""
 
                 rows_html += (
                     f'<tr class="tl-row {row_class}" data-id="{e["ids"]}">'
@@ -2170,7 +2003,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                     f'<td><strong>{e["duration"]} min</strong></td>'
                     f'{cycle_td}</tr>'
                 )
-        
 
         # Унікальний ID для цього блоку
         scroll_id = f"activity-scroll-{mname.replace('_', '-')}"
@@ -2224,14 +2056,26 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
             # Визначаємо операцію
             op_num = get_operation_number(prog)
 
-            # Calculated = KDE на фіолетових числах (cycle_time з кожного циклу)
-            cycle_times = [c["cycle_time"] for c in current_cycles if c.get("cycle_time") and c["cycle_time"] > 0]
+            # Calculated = повний час блоку (run + setup) = start-to-start між
+            # послідовними циклами тієї ж програми, без обмеження порогом.
+            # Це збігається з колонкою Cycle у Activity Log.
+            sorted_cc = sorted(current_cycles, key=lambda c: c["start"])
+            block_times = []
+            for idx_c, cc in enumerate(sorted_cc):
+                if idx_c + 1 < len(sorted_cc) and cc.get("start") and sorted_cc[idx_c + 1].get("start"):
+                    bt = round((sorted_cc[idx_c + 1]["start"] - cc["start"]).total_seconds() / 60, 2)
+                    if bt > 0:
+                        block_times.append(bt)
+                else:
+                    # Останній цикл — використовуємо cycle_time або duration
+                    ct = cc.get("cycle_time") or cc.get("duration", 0)
+                    if ct and ct > 0:
+                        block_times.append(ct)
 
-            if cycle_times:
-                calc_target = calculate_real_cycle_time(cycle_times)
+            if block_times:
+                calc_target = calculate_real_cycle_time(block_times)
             else:
-                cycle_durs = [c["duration"] for c in current_cycles if c.get("duration", 0) > 0]
-                calc_target = calculate_real_cycle_time(cycle_durs) if cycle_durs else None
+                calc_target = None
 
             if calc_target is None:
                 continue
@@ -2325,7 +2169,6 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
           <div class="section-title">📋 Activity Log — {len(c_list)} cycles, {len(d_list)} downtimes ({total_down} min)</div>
           <div style="padding:0 0 4px">{activity_section(c_list, d_list, mname)}</div>
           {cycles_section(c_list, mname, excel_targets)}
-          {history_chart(mname)}
         </div>"""
 
     return f"""<!DOCTYPE html>
@@ -2806,13 +2649,19 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
         fill:false,spanGaps:false}};
     }});
   }}
-  function opts(){{return{{clip:false,responsive:true,maintainAspectRatio:false,layout:{{padding:0}},
+  function yMax(datasets){{
+    var mx=100;
+    datasets.forEach(function(d){{d.data.forEach(function(v){{if(v!=null&&v>mx)mx=v;}});}});
+    return Math.ceil(mx/10)*10+10;
+  }}
+  function opts(datasets){{var ym=datasets?yMax(datasets):110;return{{clip:false,responsive:true,maintainAspectRatio:false,layout:{{padding:0}},
     interaction:{{mode:'index',intersect:false}},
     plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return c.dataset.label+': '+(c.parsed.y!=null?c.parsed.y+'%':'—');}}}}}}  }},
-    scales:{{y:{{display:false,min:-5,max:100,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:false}}}},x:{{display:false,offset:true,ticks:{{maxRotation:45}},grid:{{display:false}}}}}}}};}}
-  function optsToday(){{
-    var o=opts();
-    o.scales.y={{display:true,min:0,max:100,ticks:{{callback:function(v){{return v+'%';}},stepSize:10}},grid:{{color:'rgba(100,116,139,0.15)'}}}};
+    scales:{{y:{{display:false,min:-5,max:ym,ticks:{{callback:function(v){{return v<0?'':v+'%';}}}},title:{{display:false}}}},x:{{display:false,offset:true,ticks:{{maxRotation:45}},grid:{{display:false}}}}}}}};}}
+  function optsToday(datasets){{
+    var o=opts(datasets);
+    var ym=datasets?yMax(datasets):110;
+    o.scales.y={{display:true,min:0,max:ym,ticks:{{callback:function(v){{return v+'%';}},stepSize:10}},grid:{{color:'rgba(100,116,139,0.15)'}}}};
     o.scales.x={{display:true,offset:true,ticks:{{maxRotation:0,color:'#475569',font:{{size:11}}}},grid:{{display:false}}}};
     o.layout={{padding:{{left:4,right:12,top:4,bottom:4}}}};
     return o;
@@ -2837,7 +2686,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     var d2=ds(labels,function(k,lbl){{var h=parseInt(lbl);return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:0;}});
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
-    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday()}});
+    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday(d2)}});
     requestAnimationFrame(function(){{tCh.resize();var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-today',d2);
     var ttb=document.getElementById('today-table-wrap');
@@ -3019,7 +2868,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     var _wrap=ctx.closest('.chart-wrap');
     var _minW=Math.max(600,dates.length*22);
     if(_wrap){{_wrap.style.width='';_wrap.style.minWidth=_minW+'px';}}
-    pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts()}});
+    pCh=new Chart(ctx.getContext('2d'),{{type:'line',plugins:[weekendPeriodPlugin],data:{{labels:dates.map(fmtDate),datasets:d2}},options:opts(d2)}});
     requestAnimationFrame(function(){{
       var _actualW=(_wrap&&_wrap.offsetWidth>0)?_wrap.offsetWidth:_minW;
       if(_wrap)_wrap.style.width=_actualW+'px';
@@ -3079,6 +2928,24 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     sorted.forEach(function(c){{
       var key=c.m+'|'+c.d+'|'+c.p;
       var sess=sessMap[key];
+      // Cross-midnight merge: if no session found for this date, check previous day
+      if(!sess&&c.s){{
+        var _pd=new Date(c.d+'T00:00:00');_pd.setDate(_pd.getDate()-1);
+        var _prevKey=c.m+'|'+localISO(_pd)+'|'+c.p;
+        var _prevSess=sessMap[_prevKey];
+        if(_prevSess){{
+          var _sh=parseInt(c.s.split(':')[0]),_sm=parseInt(c.s.split(':')[1]||0);
+          var _startMin=_sh*60+_sm;
+          if(!_prevSess.e){{
+            // Previous session was still ongoing at midnight (end_time="—") — this IS the cross-midnight case
+            if(_startMin<=SESSION_GAP){{sess=_prevSess;sessMap[key]=_prevSess;}}
+          }} else {{
+            var _eh=parseInt(_prevSess.e.split(':')[0]),_em=parseInt(_prevSess.e.split(':')[1]||0);
+            var _gap=_startMin+1440-(_eh*60+_em);
+            if(_gap<=SESSION_GAP){{sess=_prevSess;sessMap[key]=_prevSess;}}
+          }}
+        }}
+      }}
       if(sess&&c.s){{
         var canExtend=false;
         if(!sess.e){{
@@ -3095,12 +2962,12 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
           canExtend=(gap<=SESSION_GAP);
         }}
         if(canExtend){{
-          if(c.e&&(!sess.e||c.e>sess.e)) sess.e=c.e;
+          if(c.e&&(!sess.e_d||c.d>sess.e_d||(c.d===sess.e_d&&c.e>sess.e))){{sess.e=c.e;sess.e_d=c.d;}}
           sess.dur=(sess.dur||0)+(c.dur||0);
           return;
         }}
       }}
-      var ns={{d:c.d,m:c.m,p:c.p,s:c.s,e:c.e,dur:c.dur||0}};
+      var ns={{d:c.d,m:c.m,p:c.p,s:c.s,e:c.e,dur:c.dur||0,e_d:c.d}};
       CDATA.push(ns);
       sessMap[key]=ns;
     }});
@@ -3204,23 +3071,11 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       }}
     }});
 
-    // ── Machine separator lines + name overlay ────────────────────────
+    // ── Machine separator lines ─────────────────────────────────────
     machines.forEach(function(m,ri){{
       var y=PAD+ri*(ROW_H+PAD);
-      // Separator line
       ctx.strokeStyle='#475569'; ctx.lineWidth=1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(0,y+ROW_H+PAD/2); ctx.lineTo(canvasW,y+ROW_H+PAD/2); ctx.stroke();
-      // Machine name as text overlay (top-left of each row)
-      var shortM=m.indexOf('_')!==-1?m.split('_')[0]:m;
-      ctx.save();
-      ctx.font='bold 16px sans-serif'; ctx.textAlign='left';
-      ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=4;
-      ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.6)';
-      ctx.strokeText(shortM,6,y+ROW_H/2+4);
-      ctx.fillStyle='#ffffff';
-      ctx.shadowBlur=0;
-      ctx.fillText(shortM,6,y+ROW_H/2+4);
-      ctx.restore();
     }});
 
     // ── Collect gap metadata (idle between programs, same machine+day) ─
@@ -3252,28 +3107,50 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       }}
     }});
 
-    // ── Program bars ─────────────────────────────────────────────────
+    // ── Program bars (multi-day aware) ────────────────────────────────
     CDATA.forEach(function(c){{
       var ri=machines.indexOf(c.m); if(ri===-1) return;
-      var di=dates.indexOf(c.d); if(di===-1) return;
-      if(!c.s) return; // skip records without valid start time
-      var x=LABEL_W+di*PX_PER_DAY;
+      var startDi=dates.indexOf(c.d); if(startDi===-1) return;
+      if(!c.s) return;
       var sh=parseInt(c.s.split(':')[0]),sm=parseInt(c.s.split(':')[1]||0);
       var eh=c.e?parseInt(c.e.split(':')[0]):sh, em=c.e?parseInt(c.e.split(':')[1]||0):sm;
-      var bx=x+Math.round((sh*60+sm)/1440*PX_PER_DAY);
-      var ex=x+Math.round((eh*60+em)/1440*PX_PER_DAY);
-      var bw=Math.max(ex-bx,4);
+      var endDi=c.e_d?dates.indexOf(c.e_d):startDi;
+      if(endDi===-1) endDi=startDi;
       var y=PAD+ri*(ROW_H+PAD);
-      ctx.fillStyle=progColor[c.p]||'#94a3b8';
-      ctx.beginPath(); ctx.roundRect(bx,y+3,bw,ROW_H-6,3); ctx.fill();
-      if(bw>36){{
-        ctx.fillStyle='rgba(255,255,255,0.92)';
-        ctx.font='bold 9px sans-serif'; ctx.textAlign='left';
-        ctx.save(); ctx.beginPath(); ctx.rect(bx+2,y+3,bw-4,ROW_H-6); ctx.clip();
-        ctx.fillText(c.p,bx+5,y+ROW_H/2+3);
-        ctx.restore();
+      for(var dayIdx=startDi;dayIdx<=Math.min(endDi,dates.length-1);dayIdx++){{
+        var x_d=LABEL_W+dayIdx*PX_PER_DAY;
+        var segS=(dayIdx===startDi)?sh*60+sm:0;
+        var segE=(dayIdx===endDi)?eh*60+em:1440;
+        if(segS>=segE) continue;
+        var bx=x_d+Math.round(segS/1440*PX_PER_DAY);
+        var ex2=x_d+Math.round(segE/1440*PX_PER_DAY);
+        var bw=Math.max(ex2-bx,4);
+        ctx.fillStyle=progColor[c.p]||'#94a3b8';
+        ctx.beginPath(); ctx.roundRect(bx,y+3,bw,ROW_H-6,3); ctx.fill();
+        if(bw>36){{
+          ctx.fillStyle='rgba(255,255,255,0.92)';
+          ctx.font='bold 9px sans-serif'; ctx.textAlign='left';
+          ctx.save(); ctx.beginPath(); ctx.rect(bx+2,y+3,bw-4,ROW_H-6); ctx.clip();
+          ctx.fillText(c.p,bx+5,y+ROW_H/2+3);
+          ctx.restore();
+        }}
+        barMeta.push({{x:bx,y:y+3,w:bw,h:ROW_H-6,c:c}});
       }}
-      barMeta.push({{x:bx,y:y+3,w:bw,h:ROW_H-6,c:c}});
+    }});
+
+    // ── Machine name overlay (drawn last = on top of bars) ───────────
+    machines.forEach(function(m,ri){{
+      var y=PAD+ri*(ROW_H+PAD);
+      var shortM=m.indexOf('_')!==-1?m.split('_')[0]:m;
+      ctx.save();
+      ctx.font='bold 16px sans-serif'; ctx.textAlign='left';
+      ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=4;
+      ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.6)';
+      ctx.strokeText(shortM,6,y+ROW_H/2+4);
+      ctx.fillStyle='#ffffff';
+      ctx.shadowBlur=0;
+      ctx.fillText(shortM,6,y+ROW_H/2+4);
+      ctx.restore();
     }});
 
   }}
