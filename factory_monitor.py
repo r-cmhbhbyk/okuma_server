@@ -2600,8 +2600,29 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
   (function(){{
     var fd=document.getElementById('machine-filter');
     if(!fd) return;
+    function setAll(on){{
+      var cbs=fd.querySelectorAll('input[type=checkbox]');
+      cbs.forEach(function(cb){{
+        cb.checked=on;
+        var lbl=cb.parentElement;
+        lbl.style.background=on?(lbl.dataset.bg||'transparent'):'transparent';
+      }});
+      if(tCh) initToday();
+      updatePeriodChart();
+    }}
+    var btnStyle='cursor:pointer;font-size:0.75rem;font-weight:700;padding:4px 10px;'
+      +'border-radius:20px;border:2px solid #cbd5e1;background:#fff;color:#1e293b;'
+      +'transition:background .15s';
+    var btnAll=document.createElement('button');
+    btnAll.type='button';btnAll.textContent='All';btnAll.style.cssText=btnStyle;
+    btnAll.addEventListener('click',function(){{setAll(true);}});
+    var btnNone=document.createElement('button');
+    btnNone.type='button';btnNone.textContent='None';btnNone.style.cssText=btnStyle;
+    btnNone.addEventListener('click',function(){{setAll(false);}});
+    fd.appendChild(btnAll);fd.appendChild(btnNone);
     MK.forEach(function(k,i){{
       var lbl=document.createElement('label');
+      lbl.dataset.bg=COLS[i]+'22';
       lbl.style.cssText='display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.8rem;'
         +'color:#1e293b;font-weight:600;user-select:none;padding:3px 10px 3px 6px;'
         +'border-radius:20px;border:2px solid '+COLS[i]+';background:'+COLS[i]+'22;transition:background .15s';
@@ -2625,7 +2646,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
   function getSelected(){{
     var cbs=document.querySelectorAll('#machine-filter input[type=checkbox]');
     var sel=[];cbs.forEach(function(cb){{if(cb.checked)sel.push(cb.dataset.m);}});
-    return sel.length?sel:MK;
+    return sel;
   }}
   function ds(labels,getFn){{
     var sel=getSelected();
