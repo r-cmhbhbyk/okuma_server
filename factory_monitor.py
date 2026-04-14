@@ -704,7 +704,7 @@ def save_to_db(conn, date_str, cycles, downtimes):
         d_data    = downtimes[mname]
         run_min   = d_data.get("total_run_all", d_data["total_run"])  # all hours, for SITE calc
         down_min  = d_data["total_down"]
-        total_min = _work_window_min(date_str)
+        total_min = _work_window_min(date_str) or d_data.get("total_min", 0)
         run_min_working = d_data["total_run"]  # working hours only
         eff       = round(run_min_working / total_min * 100, 1) if total_min else 0
         avg_cycle = round(sum(c["duration"] for c in c_list) / len(c_list), 1) if c_list else 0
@@ -1711,12 +1711,19 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _all_daily = {}; _mk_set = set(_all_known_machines)
     try:
         if conn:
-            for _r in conn.execute("SELECT date,machine,run_min,total_min,efficiency FROM daily_summary ORDER BY date").fetchall():
-                _d2, _m2_raw, _ru, _tm, _ef = _r
+            for _r in conn.execute("SELECT date,machine,run_min,down_min,total_min,efficiency FROM daily_summary ORDER BY date").fetchall():
+                _d2, _m2_raw, _ru, _dm, _tm, _ef = _r
                 _m2 = _canonical_machine(_m2_raw)
                 if _d2 not in _all_daily: _all_daily[_d2] = {}
-                if _tm:
-                    _all_daily[_d2][_m2] = round(_ef) if _ef else 0
+                if _tm or _ru:
+                    if _ef and _ef > 0:
+                        _all_daily[_d2][_m2] = round(_ef)
+                    elif _ru and _ru > 0:
+                        # Вихідні або зламані дані — перерахувати з run/(run+down)
+                        _denom = (_ru or 0) + (_dm or 0)
+                        _all_daily[_d2][_m2] = round(_ru / _denom * 100) if _denom > 0 else 0
+                    else:
+                        _all_daily[_d2][_m2] = 0
                     _all_daily[_d2].setdefault("__s__",{"r":0})
                     _all_daily[_d2]["__s__"]["r"] += _ru or 0
                 _mk_set.add(_m2)
@@ -1725,7 +1732,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     for _d2 in _all_daily:
         for _m2 in _mk_set:
             if _m2 not in _all_daily[_d2]:
-                _all_daily[_d2][_m2] = None
+                _all_daily[_d2][_m2] = 0
         _sd = _all_daily[_d2].pop("__s__",{})
         _ww = _work_window_min(_d2)
         if _ww > 0:
@@ -1756,9 +1763,11 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                     continue  # skip records without valid start time (renders at 00:00)
                 _e = _r[4] if _r[4] and _r[4] != "—" else None
                 if not _e:
-                    # Ongoing cycle: was still running when script analyzed this day
-                    # → extend to end of day so cross-midnight merge works
-                    _e = "23:59"
+                    # Ongoing cycle: use generation time for today, 23:59 for past days
+                    if _r[0] == today_str:
+                        _e = datetime.now().strftime("%H:%M")
+                    else:
+                        _e = "23:59"
                 _cdata.append({
                     "d": _r[0],
                     "m": (_r[1].split("_")[0] if "_" in _r[1] else _r[1]),
@@ -2661,7 +2670,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
           return Math.round(sum/selM.length);
         }});
       }}else{{
-        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:null;}});
+        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}});
       }}
       return {{label:SK[i],data:data,
         borderColor:COLS[i],backgroundColor:COLS[i]+'22',tension:0.3,
@@ -2770,7 +2779,8 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       }});
       var labels=chart.data.labels,n=labels.length;if(n<2)return;
       var step=xScale.getPixelForValue(1)-xScale.getPixelForValue(0);
-      // Weekend shading + SAT/SUN label + day separator lines
+      // Weekend shading + SAT/SUN label + day separator lines + date labels
+      var dayStep=step>=28?1:Math.ceil(28/step);
       labels.forEach(function(lbl,i){{
         var dow=parseLblDate(lbl).getDay();
         var cx=xScale.getPixelForValue(i);
@@ -2782,11 +2792,17 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
           ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
           ctx2.fillText(dow===6?'SAT':'SUN',cx,c.top+11);
           ctx2.restore();
+        }}else if(i%dayStep===0){{
+          var dn=['SUN','MON','TUE','WED','THU','FRI','SAT'][dow];
+          ctx2.save();
+          ctx2.fillStyle='rgba(100,116,139,0.55)';
+          ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
+          ctx2.fillText(dn,cx,c.top+11);
+          ctx2.restore();
         }}
         // Day separator line at left edge of each column (between prev day and this day)
         if(i>0){{
           var sepX=cx-step/2;
-          var prevDow=parseLblDate(labels[i-1]).getDay();
           ctx2.save();
           ctx2.strokeStyle='#475569'; ctx2.lineWidth=1;
           ctx2.setLineDash([]);
@@ -2794,6 +2810,13 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
           ctx2.restore();
         }}
       }});
+    }},
+    afterDraw(chart){{
+      var xScale=chart.scales.x;
+      var labels=chart.data.labels;
+      if(!labels||labels.length<2)return;
+      var ctx2=chart.ctx;
+      var step=xScale.getPixelForValue(1)-xScale.getPixelForValue(0);
       // Week number labels + dashed separators
       var wg={{}};
       labels.forEach(function(lbl,i){{
@@ -2805,9 +2828,11 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
         var wn=entry[0],idxs=entry[1];
         var avgX=idxs.reduce(function(s,i){{return s+xScale.getPixelForValue(i);}},0)/idxs.length;
         ctx2.save();
-        ctx2.fillStyle='rgba(80,80,180,0.75)';
+        ctx2.fillStyle='rgba(248,250,252,0.8)';
+        ctx2.fillRect(avgX-14,chart.height-12,28,12);
+        ctx2.fillStyle='rgba(80,80,180,0.85)';
         ctx2.font='bold 10px sans-serif';ctx2.textAlign='center';
-        ctx2.fillText('W'+wn,avgX,c.bottom-4);
+        ctx2.fillText('W'+wn,avgX,chart.height-3);
         if(gi>0){{
           var prev=weeks[gi-1][1];
           var sepX=(xScale.getPixelForValue(idxs[0])+xScale.getPixelForValue(prev[prev.length-1]))/2;
@@ -2830,7 +2855,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     {{var _c=new Date(from+'T00:00:00'),_e=new Date(to+'T00:00:00');
       while(_c<=_e){{dates.push(localISO(_c));_c.setDate(_c.getDate()+1);}}}}
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
-    var d2=ds(dates,function(k,d){{return ALL[d]?ALL[d][k]:null;}});
+    var d2=ds(dates,function(k,d){{return ALL[d]&&ALL[d][k]!=null?ALL[d][k]:0;}});
     // Weekly average curve
     (function(){{
       var sel=getSelected();
@@ -3159,22 +3184,38 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       }}
     }});
 
-    // ── Machine name overlay (drawn last = on top of bars) ───────────
+    // Save clean canvas (without machine names) for sticky redraw on scroll
+    _ganttClean=ctx.getImageData(0,0,cv.width,cv.height);
+    _drawMachineNames();
+  }}
+
+  // ── Sticky machine labels (redrawn on scroll) ─────────────────────
+  var _ganttClean=null;
+  function _drawMachineNames(){{
+    if(!_ganttClean||!machines.length)return;
+    var _ctx=cv.getContext('2d');
+    _ctx.putImageData(_ganttClean,0,0);
+    var _gSc2=document.getElementById('gantt-scroll-outer');
+    var _scrollX=_gSc2?_gSc2.scrollLeft:0;
     machines.forEach(function(m,ri){{
       var y=PAD+ri*(ROW_H+PAD);
       var shortM=m.indexOf('_')!==-1?m.split('_')[0]:m;
-      ctx.save();
-      ctx.font='bold 16px sans-serif'; ctx.textAlign='left';
-      ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=4;
-      ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.6)';
-      ctx.strokeText(shortM,6,y+ROW_H/2+4);
-      ctx.fillStyle='#ffffff';
-      ctx.shadowBlur=0;
-      ctx.fillText(shortM,6,y+ROW_H/2+4);
-      ctx.restore();
+      _ctx.save();
+      _ctx.font='bold 16px sans-serif';_ctx.textAlign='left';
+      _ctx.shadowColor='rgba(0,0,0,0.8)';_ctx.shadowBlur=4;
+      _ctx.lineWidth=3;_ctx.strokeStyle='rgba(0,0,0,0.6)';
+      _ctx.strokeText(shortM,_scrollX+6,y+ROW_H/2+4);
+      _ctx.fillStyle='#ffffff';_ctx.shadowBlur=0;
+      _ctx.fillText(shortM,_scrollX+6,y+ROW_H/2+4);
+      _ctx.restore();
     }});
-
   }}
+  (function(){{
+    var _gSc3=document.getElementById('gantt-scroll-outer');
+    if(_gSc3){{var _raf;_gSc3.addEventListener('scroll',function(){{
+      if(_raf)return;_raf=requestAnimationFrame(function(){{_drawMachineNames();_raf=null;}});
+    }});}}
+  }})();
 
   // Initial draw: last 7 days
   (function(){{
