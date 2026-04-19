@@ -1,4 +1,4 @@
-# VERSION: 2026-03-06-v9
+# VERSION: 2026-04-19-v10
 """
 Factory Machine Monitor
 =======================
@@ -26,24 +26,26 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import lru_cache
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import TimeoutException, WebDriverException, StaleElementReferenceException
+# Selenium видалено — використовується Connect Plan WebAPI
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOWNLOAD_DIR        = r"C:\Connectplan_raports"
-CSV_FILE            = os.path.join(DOWNLOAD_DIR, "operation_history.csv")
-MACHINING_RESULT    = os.path.join(DOWNLOAD_DIR, "machining_results.csv")
 OUTPUT_HTML         = os.path.join(DOWNLOAD_DIR, "index.html")
 DB_FILE             = os.path.join(DOWNLOAD_DIR, "history.db")
 LOG_FILE            = os.path.join(DOWNLOAD_DIR, "factory_monitor.log")
-URL                 = "http://192.168.1.210/csv/OutputCSVWeb.aspx?FactoryID=1&AreaID=1"
-WAIT_TIME           = 300
 HOURS_BACK          = 24
+
+# ── Connect Plan WebAPI ───────────────────────────────────────────────────────
+API_BASE  = "http://192.168.1.210/FactoryMonitorSuiteSVC"
+# ProcResID → повна назва станку (з GetMachineList)
+PROC_RES_MAP = {
+    1:  "M1_M560R-V-e_0712-100198",
+    7:  "M2_M560R-V-e-M5V01235",
+    6:  "T1_L300E-M_PEA351",
+    3:  "T2_ L300-MYW-e_MYW197",
+    8:  "T3_LB2000EXII_254633",
+    12: "T4_LB3000EXII_247289",
+}
 ALERT_THRESHOLD_MIN = 45
 S2S_GAP_THRESHOLD_MIN = 15  # Макс. розрив між циклами для start-to-start (хв); якщо більше — цикл не розтягується
 
@@ -460,203 +462,123 @@ def _work_window_min(date_str: str) -> int:
 # PART 1 — DOWNLOAD
 # =============================================================================
 
-def download_both_files():
-    """Завантажує operation_history.csv та machining_results.csv за один запуск браузера"""
-    log("============================================================")
-    log("DOWNLOADING BOTH FILES FROM CONNECT PLAN")
-    log("============================================================")
-    
-    # Крок 1: Видаляємо всі CSV файли
-    log("── Step 1: Clearing all CSV files ──")
-    for filename in os.listdir(DOWNLOAD_DIR):
-        if filename.lower().endswith(".csv"):
-            try:
-                os.remove(os.path.join(DOWNLOAD_DIR, filename))
-                log(f"Deleted: {filename}")
-            except Exception as exc:
-                log(f"Could not delete {filename}: {exc}")
-    
-    # Налаштування Chrome
-    options = Options()
-    options.add_experimental_option("prefs", {
-        "download.default_directory":   DOWNLOAD_DIR,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade":   True,
-        "safebrowsing.enabled":         True,
-    })
-    
-    # Оптимізації для швидкості:
-    options.add_argument("--headless=new")          # Без GUI - швидше!
-    options.add_argument("--disable-gpu")           # Не потрібна графіка
-    options.add_argument("--no-sandbox")            # Швидший запуск
-    options.add_argument("--disable-dev-shm-usage") # Менше пам'яті
-    options.add_argument("--disable-extensions")    # Без розширень
-    options.add_argument("--disable-logging")       # Без логів
-    options.add_argument("--log-level=3")           # Мінімум логування
-    
-    driver = webdriver.Chrome(options=options)
-    
+def _api_get(endpoint: str, params: dict) -> list:
+    """Виконує GET запит до Connect Plan WebAPI, повертає data[]."""
+    qs = urllib.parse.urlencode(params)
+    url = f"{API_BASE}/{endpoint}?{qs}"
     try:
-        # Крок 2: Відкриваємо сторінку
-        log("── Step 2: Opening page in Chrome ──")
-        driver.get(URL)
-        wait = WebDriverWait(driver, WAIT_TIME)
-        # Видалено time.sleep(3) - WebDriverWait вже чекає готовності
-        
-        # Крок 3: Обираємо всі машини
-        log("── Step 3: Selecting all machines ──")
-        checkbox = wait.until(EC.element_to_be_clickable((By.ID, "all_machines_check")))
-        if not checkbox.is_selected():
-            checkbox.click()
-            log("✓ All machines selected")
-        else:
-            log("✓ All machines already selected")
-        # Видалено time.sleep(3) - непотрібно
-        
-        # Крок 4: Тиснемо Download (operation_history)
-        log("── Step 4: Downloading operation_history.csv ──")
-        click_time_1 = None
-        for _attempt in range(3):
-            try:
-                btn = wait.until(EC.element_to_be_clickable((By.ID, "btn_Download")))
-                click_time_1 = time.time()
-                btn.click()
-                break
-            except StaleElementReferenceException:
-                log(f"  Stale element on attempt {_attempt+1}, retrying...")
-                time.sleep(0.5)
-        if click_time_1 is None:
-            log("✗ Could not click download button after 3 attempts")
-            return False
-        log("✓ Download button clicked — waiting for first file...")
-        
-        # Чекаємо перший файл (прискорено: перевірка кожні 0.5 сек)
-        deadline = time.time() + WAIT_TIME
-        downloaded_1 = None
-        while time.time() < deadline:
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.lower().endswith(".csv"):
-                    fp = os.path.join(DOWNLOAD_DIR, f)
-                    if os.path.getmtime(fp) >= click_time_1:
-                        downloaded_1 = fp
-                        break
-            if downloaded_1:
-                break
-            time.sleep(0.5)  # Було 2 сек → тепер 0.5 сек!
-            print(".", end="", flush=True)
-        
-        print()
-        
-        if not downloaded_1:
-            log("✗ Error: First file did not download")
-            return False
-        
-        log(f"✓ First file downloaded: {os.path.basename(downloaded_1)}")
-        
-        # Крок 5: Вибираємо MACHINING RESULT з dropdown
-        log("── Step 5: Selecting MACHINING RESULT from dropdown ──")
-        # Видалено time.sleep(2) - непотрібно
-        
-        try:
-            dropdown = wait.until(EC.presence_of_element_located((By.ID, "ddl_SelectTable")))
-            select = Select(dropdown)
-            select.select_by_value("MachningResult")  # З опечаткою як в HTML!
-            log("✓ Selected: MACHINING RESULT")
-            # Видалено time.sleep(3) - чекаємо на кнопку замість sleep
-        except Exception as e:
-            log(f"✗ Could not select MACHINING RESULT: {e}")
-            return False
-        
-        # Крок 6: Перейменовуємо перший файл (до завантаження другого!)
-        log("── Step 6: Renaming first file ──")
-        if os.path.exists(CSV_FILE):
-            os.remove(CSV_FILE)
-        os.rename(downloaded_1, CSV_FILE)
-        log(f"✓ Renamed to: operation_history.csv")
-        
-        # Показуємо інфо про перший файл
-        size1 = os.path.getsize(CSV_FILE)
-        with open(CSV_FILE, 'r', encoding='utf-8') as f:
-            lines1 = sum(1 for _ in f)
-        log(f"  Size: {size1:,} bytes, Rows: {lines1}")
-        
-        # Крок 7: Тиснемо Download (MachiningResult)
-        log("── Step 7: Downloading machining_results.csv ──")
-        btn = wait.until(EC.element_to_be_clickable((By.ID, "btn_Download")))
-        click_time_2 = time.time()
-        btn.click()
-        log("✓ Download button clicked — waiting for second file...")
-        
-        # Чекаємо другий файл з КОРОТКИМ timeout (5 секунд)
-        # Якщо немає даних - файл не завантажиться, це нормально
-        short_timeout = 5  # секунд
-        deadline = time.time() + short_timeout
-        downloaded_2 = None
-        
-        while time.time() < deadline:
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.lower().endswith(".csv"):
-                    fp = os.path.join(DOWNLOAD_DIR, f)
-                    # Шукаємо файл новіший за другий клік і не той що вже downloaded_1
-                    if os.path.getmtime(fp) >= click_time_2 and fp != downloaded_1:
-                        downloaded_2 = fp
-                        break
-            if downloaded_2:
-                break
-            time.sleep(0.5)
-            print(".", end="", flush=True)
-        
-        print()
-        
-        # Якщо другий файл не завантажився - це ОК, можливо немає даних
-        if not downloaded_2:
-            log("⚠ Second file did not download within 5 seconds (possibly no data)")
-            log("✓ Continuing without machining_results.csv")
-            # Створюємо порожній файл щоб скрипт не падав
-            with open(MACHINING_RESULT, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f)
-                # Пишемо тільки header без даних
-                writer.writerow(['Date', 'MachineName', 'ProgramFileName', 'RunStateTime', 'Counter'])
-            log(f"✓ Created empty machining_results.csv")
-        else:
-            log(f"✓ Second file downloaded: {os.path.basename(downloaded_2)}")
-            
-            # Перейменовуємо другий файл в machining_results.csv
-            if os.path.exists(MACHINING_RESULT):
-                os.remove(MACHINING_RESULT)
-            os.rename(downloaded_2, MACHINING_RESULT)
-            log(f"✓ Renamed to: machining_results.csv")
-            
-            # Показуємо інфо про другий файл
-            size2 = os.path.getsize(MACHINING_RESULT)
-            with open(MACHINING_RESULT, 'r', encoding='utf-8') as f:
-                lines2 = sum(1 for _ in f)
-            log(f"  Size: {size2:,} bytes, Rows: {lines2}")
-        
-        log("============================================================")
-        log("DOWNLOAD COMPLETE")
-        log("============================================================")
-        return True
-        
-    except TimeoutException:
-        log("✗ Error: element not found on page")
-        return False
-    except WebDriverException as exc:
-        log(f"✗ WebDriver error: {exc}")
-        return False
-    except Exception as exc:
-        log(f"✗ Unexpected error: {exc}")
-        import traceback
-        log(traceback.format_exc())
-        return False
-    finally:
-        log("Closing browser...")
-        # Видалено time.sleep(2) - непотрібно
-        driver.quit()
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        code = body.get("d", {}).get("code", -1)
+        if str(code) != "0":
+            log(f"✗ API error {code}: {body.get('d', {}).get('message')}")
+            return []
+        return body["d"]["data"]
+    except Exception as e:
+        log(f"✗ API request failed ({endpoint}): {e}")
+        return []
 
-# =============================================================================
-# PART 2 — ANALYSIS
-# =============================================================================
+
+def _api_ts(s: str) -> datetime:
+    """Парсить дату з WebAPI формату '2026.04.18 21:54:44'."""
+    return datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
+
+
+def fetch_from_api() -> tuple[list[dict], list[dict]]:
+    """Замінює download_both_files() + load_csv() + завантаження mr_data.
+
+    Повертає (rows, mr_data) — рядки в тому самому форматі що раніше давав CSV,
+    сумісні з усім подальшим кодом аналізу.
+
+    operation_history → GetOperationResult  (всі події RunState/Alarm/тощо)
+    machining_results → GetMachiningResult  (цикли з Counter)
+    """
+    log("============================================================")
+    log("FETCHING DATA FROM CONNECT PLAN WebAPI")
+    log("============================================================")
+
+    ids = ",".join(str(i) for i in PROC_RES_MAP.keys())
+    now = datetime.now()
+    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_s  = start_dt.strftime("%Y/%m/%d %H:%M:%S")
+    end_s    = now.strftime("%Y/%m/%d %H:%M:%S")
+
+    # ── 1. GetOperationResult → rows ─────────────────────────────────
+    log(f"── Fetching OperationResult {start_s} … {end_s} ──")
+    raw = _api_get("v3/GetOperationResult", {
+        "Specify":   "PROCRES",
+        "ID":        ids,
+        "StartDate": start_s,
+        "EndDate":   end_s,
+        "Sort":      0,
+    })
+    log(f"  Received {len(raw)} records")
+
+    rows = []
+    for r in raw:
+        pid = r.get("ProcResID")
+        mname = PROC_RES_MAP.get(pid, f"UNKNOWN_{pid}")
+        try:
+            ts = _api_ts(r["Date"])
+        except Exception:
+            continue
+        rows.append({
+            "_ts":              ts,
+            "Date":             r["Date"],
+            "MachineName":      mname,
+            "RunState":         str(r.get("RunState", "0")),
+            "ProgramFileName":  r.get("MainProgramFileName") or r.get("ProgramFileName") or "",
+            "PowerOn":          str(r.get("PowerOn", "0")),
+            "AlarmState":       str(r.get("AlarmState", "0")),
+            "AlarmNo":          str(r.get("AlarmNo", "")),
+            "AlarmMessage":     r.get("AlarmMessage") or r.get("AlarmString") or "",
+            "LimitState":       str(r.get("LimitState", "0")),
+            "ProgramStopState": str(r.get("ProgramStopState", "0")),
+            "FeedHoldState":    str(r.get("FeedHoldState", "0")),
+            "STMState":         str(r.get("STMState", "0")),
+            "SetUp":            str(r.get("SetUp", "0")),
+            "NoOperator":       str(r.get("NoOperator", "0")),
+            "Wait":             str(r.get("Wait", "0")),
+            "Maintenance":      str(r.get("Maintenance", "0")),
+        })
+
+    log(f"  Parsed {len(rows)} rows for analysis")
+
+    # ── 2. GetMachiningResult → mr_data ──────────────────────────────
+    log(f"── Fetching MachiningResult ──")
+    raw_mr = _api_get("v3/GetMachiningResult", {
+        "Specify":   "PROCRES",
+        "ID":        ids,
+        "StartDate": start_s,
+        "EndDate":   end_s,
+        "Sort":      0,
+    })
+    log(f"  Received {len(raw_mr)} machining records")
+
+    mr_data = []
+    for r in raw_mr:
+        pid = r.get("ProcResID")
+        mname = PROC_RES_MAP.get(pid, f"UNKNOWN_{pid}")
+        try:
+            ts = _api_ts(r["Date"])
+        except Exception:
+            ts = None
+        mr_data.append({
+            "_ts":             ts,
+            "Date":            r.get("Date", ""),
+            "MachineName":     mname,
+            "ProgramFileName": r.get("MainProgramFileName") or r.get("ProgramFileName") or "",
+            "RunStateTime":    str(r.get("RunStateTime", 0)),
+            "Counter":         str(r.get("WorkCountACount") or r.get("Counter") or 0),
+        })
+
+    log(f"  Parsed {len(mr_data)} machining records")
+    log("============================================================")
+    log("FETCH COMPLETE")
+    log("============================================================")
+    return rows, mr_data
+
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_telegram(message: str):
@@ -693,7 +615,6 @@ def init_db() -> sqlite3.Connection:
             date TEXT, machine TEXT, program TEXT, start_time TEXT, end_time TEXT,
             duration INTEGER
         )""")
-
     conn.commit()
     return conn
 
@@ -702,10 +623,10 @@ def save_to_db(conn, date_str, cycles, downtimes):
     for mname in cycles:
         c_list    = cycles[mname]
         d_data    = downtimes[mname]
-        run_min   = d_data.get("total_run_all", d_data["total_run"])  # all hours, for SITE calc
+        run_min   = d_data.get("total_run_all", d_data["total_run"])
         down_min  = d_data["total_down"]
         total_min = _work_window_min(date_str) or d_data.get("total_min", 0)
-        run_min_working = d_data["total_run"]  # working hours only
+        run_min_working = d_data["total_run"]
         eff       = round(run_min_working / total_min * 100, 1) if total_min else 0
         avg_cycle = round(sum(c["duration"] for c in c_list) / len(c_list), 1) if c_list else 0
         conn.execute("""
@@ -713,8 +634,6 @@ def save_to_db(conn, date_str, cycles, downtimes):
             (date,machine,run_min,down_min,total_min,cycles,avg_cycle,efficiency)
             VALUES (?,?,?,?,?,?,?,?)
         """, (date_str, mname, run_min, down_min, total_min, len(c_list), avg_cycle, eff))
-        
-        # Зберігаємо окремі цикли
         conn.execute("DELETE FROM cycle_events WHERE date=? AND machine=?", (date_str, mname))
         for c in c_list:
             conn.execute("""
@@ -725,8 +644,6 @@ def save_to_db(conn, date_str, cycles, downtimes):
                   c["start"].strftime("%H:%M") if c.get("start") else "—",
                   c["end"].strftime("%H:%M") if c.get("end") else "—",
                   c["duration"]))
-
-        # Зберігаємо простої
         conn.execute("DELETE FROM downtime_events WHERE date=? AND machine=?", (date_str, mname))
         for d in d_data["downtimes"]:
             conn.execute("""
@@ -737,8 +654,8 @@ def save_to_db(conn, date_str, cycles, downtimes):
                   d["start"].strftime("%H:%M"),
                   d["end"].strftime("%H:%M") if d.get("end") else "ongoing",
                   d["duration"], d["reason"]))
-
     conn.commit()
+
 
 def load_history(conn, machine: str, days: int = 7) -> list:
     cur = conn.execute("""
@@ -749,10 +666,6 @@ def load_history(conn, machine: str, days: int = 7) -> list:
 
 
 # ── Data processing ───────────────────────────────────────────────────────────
-def load_csv() -> list[dict]:
-    with open(CSV_FILE, encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
 def get_counter_markers(mr_data, cycles_dict):
     """Повертає {machine_name: [datetime, ...]} — моменти COUNTER.MIN що реально
     потрапляють в межі циклу програми на цій машині (Counter >= 1).
@@ -2435,7 +2348,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 {nav_buttons}
 </div>
 <button id="scroll-top" onclick="window.scrollTo({{top:0,behavior:'smooth'}})" title="↑">↑</button>
-<div class="footer">Source: {CSV_FILE} &nbsp;|&nbsp; DB: {DB_FILE}</div>
+<div class="footer">Source: Connect Plan WebAPI ({API_BASE}) &nbsp;|&nbsp; DB: {DB_FILE}</div>
 <div id="tl-tooltip"></div>
 <script>
 function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();return y+'-'+(m<10?'0':'')+m+'-'+(dd<10?'0':'')+dd;}}
@@ -3311,64 +3224,62 @@ document.addEventListener('DOMContentLoaded',function(){{
 </html>"""
 # =============================================================================
 def main():
+    import traceback as _tb
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    # Step 1+2 — download both files
     log("=" * 60)
     log("FACTORY MONITOR START")
     log("=" * 60)
-    if not download_both_files():
-        log("Download failed — aborting.")
+
+    # Step 2 — fetch data via WebAPI
+    rows, mr_data = fetch_from_api()
+    if not rows:
+        log("No data received from API — aborting.")
         sys.exit(1)
 
-    # Step 3 — analyze
-    log("── Step 3: Analyzing data ──")
-    rows = load_csv()
-    for r in rows:
-        r["_ts"] = _parse_ts(r["Date"])
-        r["MachineName"] = _canonical_machine(r.get("MachineName", ""))
     log(f"Rows loaded: {len(rows)}")
-    log(f"Machines in CSV: {sorted(set(r['MachineName'] for r in rows if r.get('MachineName')))}")
+    log(f"Machines: {sorted(set(r['MachineName'] for r in rows if r.get('MachineName')))}")
 
     filtered, period_from, period_to = filter_last_hours(rows, HOURS_BACK)
     date_str = period_to.strftime("%Y-%m-%d")
     log(f"Period: {period_from.strftime('%H:%M')} – {period_to.strftime('%H:%M')} ({len(filtered)} rows)")
 
-    cycles        = analyze_cycles(filtered)
+    # Step 3 — analyze
+    try:
+        log("── Step 3: Analyzing cycles ──")
+        cycles = analyze_cycles(filtered)
+        log(f"  Cycles: {sum(len(v) for v in cycles.values())}")
 
-    # Load mr_data for cycle time calculation and COUNTER markers
-    mr_data = []
-    if os.path.exists(MACHINING_RESULT):
-        with open(MACHINING_RESULT, encoding="utf-8") as f:
-            mr_data = list(csv.DictReader(f))
-        for r in mr_data:
-            try:
-                r["_ts"] = _parse_ts(r["Date"])
-            except (ValueError, KeyError):
-                r["_ts"] = None
-            r["MachineName"] = _canonical_machine(r.get("MachineName", ""))
-        log(f"Loaded {len(mr_data)} records from MachiningResult")
-    else:
-        log("MachiningResult file not found, mr_data is empty")
+        log("── Step 3.1: Counter markers ──")
+        counter_markers = get_counter_markers(mr_data, cycles)
+        counter_machines = set(counter_markers.keys())
+        cycles = split_cycles_by_counter(cycles, counter_markers)
+        cycles, counter_markers = apply_start_to_start_cycles(cycles, counter_markers, mr_data)
+        counter_markers = add_runstate_boundary_markers(counter_markers, filtered, counter_machines)
+        log(f"  Counter machines: {sorted(counter_machines)}")
 
-    counter_markers = get_counter_markers(mr_data, cycles)
-    counter_machines = set(counter_markers.keys())  # машини що реально мають COUNTER
-    cycles = split_cycles_by_counter(cycles, counter_markers)
-    # Для машин без COUNTER — перераховуємо цикли як start-to-start
-    # і генеруємо маркери на межах між циклами
-    cycles, counter_markers = apply_start_to_start_cycles(cycles, counter_markers, mr_data)
-    # Для машин з COUNTER — додаємо маркери на межах RunState 1↔0
-    counter_markers = add_runstate_boundary_markers(counter_markers, filtered, counter_machines)
+        log("── Step 3.2: Downtime ──")
+        downtimes = analyze_downtime(filtered)
 
-    downtimes     = analyze_downtime(filtered)
-    timeline_data = build_timeline_data(filtered, period_from, period_to)
-    timeline_data = split_timeline_by_counter(timeline_data, counter_markers, period_from, period_to)
+        log("── Step 3.3: Timeline ──")
+        timeline_data = build_timeline_data(filtered, period_from, period_to)
+        timeline_data = split_timeline_by_counter(timeline_data, counter_markers, period_from, period_to)
+        log("  Timeline done")
+    except Exception as e:
+        log(f"✗ Analysis error: {e}")
+        log(_tb.format_exc())
+        sys.exit(1)
 
-    conn = init_db()
-    save_to_db(conn, date_str, cycles, downtimes)
-    log("History saved to DB")
+    try:
+        conn = init_db()
+        save_to_db(conn, date_str, cycles, downtimes)
+        log("History saved to DB")
+    except Exception as e:
+        log(f"✗ DB error: {e}")
+        log(_tb.format_exc())
+        sys.exit(1)
 
-    # Step 3.5 — load Excel target times (перед алертами!)
+    # Step 3.5 — load Excel target times
     log("── Step 3.5: Loading Excel target times ──")
     excel_targets = load_target_times()
 
@@ -3378,8 +3289,7 @@ def main():
         html = generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn, excel_targets, counter_markers)
     except Exception as e:
         log(f"✗ Error generating HTML: {e}")
-        import traceback
-        log(traceback.format_exc())
+        log(_tb.format_exc())
         raise
 
     conn.close()
@@ -3392,7 +3302,7 @@ def main():
     log("── Step 5: Publishing to GitHub Pages ──")
     publish_to_github(html)
 
-    # Step 6 — wait 3 min for GitHub Pages to deploy, then send Telegram alert
+    # Step 6 — Telegram alert
     log("── Step 6: Waiting 1 minute before sending Telegram alert ──")
     time.sleep(60)
     check_and_alert(downtimes, period_to, cycles, excel_targets)
