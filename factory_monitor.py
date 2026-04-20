@@ -1,4 +1,4 @@
-# VERSION: 2026-04-19-v10
+# VERSION: V14
 """
 Factory Machine Monitor
 =======================
@@ -20,6 +20,7 @@ import sqlite3
 import csv
 import sys
 import json
+import subprocess
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
@@ -1227,30 +1228,47 @@ def publish_to_github(html: str) -> bool:
 
 def check_and_alert(downtimes, period_to, cycles, excel_targets):
     """Перевіряє простої та відправляє Telegram алерти
-    
+
     Умови відправлення алерту:
     1. Є новий невідрапортований простій ≥45 хв, АБО
     2. Є старий ongoing простій що збільшився на +45 хв, АБО
     3. Є різниця між Calculated та Target >5%
-    
+
     Додаткові правила:
     - Не відправляємо з 20:00 до 08:00
     - Закінчені простої не повторюємо
-    - Target алерти відправляємо раз на добу
+    - Всі повідомлення відправляємо не частіше ніж раз на годину
     - Через 24 години скидаємо список
     """
-    log("── Step 3.6: Checking alerts ──")
-    
+    log("── Step 3.6: Checking alerts (V14) ──")
+
     current_hour = datetime.now().hour
     current_time = datetime.now()
-    
+
     log(f"Current hour: {current_hour}, downtimes: {len(downtimes)} machines, cycles: {len(cycles)} machines")
-    
+
     # 1. Перевіряємо тихі години (20:00 - 08:00)
     if current_hour >= 20 or current_hour < 8:
         log("Silent hours (20:00-08:00) - no alerts sent")
         return
-    
+
+    # 2. Перевіряємо чи минула 1 година з останнього повідомлення (маркер-файл)
+    telegram_marker = os.path.join(DOWNLOAD_DIR, "last_telegram_sent.txt")
+    try:
+        if os.path.exists(telegram_marker):
+            marker_mtime = os.path.getmtime(telegram_marker)
+            minutes_since_last = (time.time() - marker_mtime) / 60
+            log(f"Telegram marker exists, last sent {minutes_since_last:.0f} min ago")
+            if minutes_since_last < 55:
+                log(f"Less than 55 min since last Telegram — SKIPPING entire alert check")
+                return
+            else:
+                log(f"More than 55 min — will send if needed")
+        else:
+            log("No telegram marker file — first run, will send")
+    except Exception as e:
+        log(f"Telegram marker check error: {e} — will proceed")
+
     # Файл для збереження вже відправлених алертів
     sent_alerts_file = os.path.join(DOWNLOAD_DIR, "sent_alerts.json")
     
@@ -1436,7 +1454,8 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     if downtime_alerts or target_alerts or on_target or no_norm_alerts or all_ongoing:
         # Є проблеми або ongoing простої
         lines = [
-            f"⚠️ <b>Factory Alert</b>  {period_to.strftime('%H:%M')}",
+            f"⚠️ <b>Factory Alert</b>  <i>V14</i>",
+            f"📅 Data: {period_to.strftime('%H:%M')}  |  Sent: {current_time.strftime('%H:%M')}",
             f"🔗 <a href=\"{GITHUB_URL}\">Open report</a>\n"
         ]
 
@@ -1455,7 +1474,8 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
     else:
         # Все ОК - відправляємо позитивне повідомлення
         lines = [
-            f"✅ <b>All Systems Normal</b>  {period_to.strftime('%H:%M')}",
+            f"✅ <b>All Systems Normal</b>  <i>V14</i>",
+            f"📅 Data: {period_to.strftime('%H:%M')}  |  Sent: {current_time.strftime('%H:%M')}",
             f"🔗 <a href=\"{GITHUB_URL}\">Open report</a>\n",
             f"📊 All {total_machines} machines within target cycle times"
         ]
@@ -1513,32 +1533,15 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
                 f"\n   Cycle: {calc} min | Cycles: {n_cycles}"
             )
 
-    # Перевіряємо чи треба відправляти "All OK" повідомлення
-    should_send = True
-    if not downtime_alerts and not target_alerts and not no_norm_alerts and not all_ongoing:
-        # Все ОК - перевіряємо коли востаннє відправляли таке повідомлення
-        last_ok_alert = sent_alerts.get("_last_all_ok_alert")
-        
-        if last_ok_alert:
-            last_ok_time = datetime.fromisoformat(last_ok_alert)
-            hours_since_last = (current_time - last_ok_time).total_seconds() / 3600
-            
-            if hours_since_last < 4:
-                # Менше 4 годин - не відправляємо
-                log(f"All OK, but last message was {hours_since_last:.1f}h ago (< 4h) - skipping")
-                should_send = False
-            else:
-                log(f"All OK, last message was {hours_since_last:.1f}h ago - sending")
-        else:
-            log("All OK - sending first time")
-    
-    # Відправляємо
-    if should_send:
-        send_telegram("\n".join(lines))
-        
-        # Якщо це було "All OK" повідомлення - запам'ятовуємо час
-        if not downtime_alerts and not target_alerts:
-            sent_alerts["_last_all_ok_alert"] = current_time.isoformat()
+    # Відправляємо (перевірка 55 хв вже пройдена на початку функції)
+    send_telegram("\n".join(lines))
+    # Оновлюємо маркер — просто створюємо/перезаписуємо файл
+    try:
+        with open(telegram_marker, "w") as f:
+            f.write(current_time.isoformat())
+        log(f"Telegram marker updated: {telegram_marker}")
+    except Exception as e:
+        log(f"Failed to write telegram marker: {e}")
     
     # Зберігаємо оновлений список
     with open(sent_alerts_file, "w", encoding="utf-8") as f:
@@ -3223,12 +3226,64 @@ document.addEventListener('DOMContentLoaded',function(){{
 </body>
 </html>"""
 # =============================================================================
+def kill_old_instances():
+    """Kill any other running instances of factory_monitor.py"""
+    my_pid = os.getpid()
+    try:
+        # Get all python processes with their command lines
+        result = subprocess.run(
+            ['wmic', 'process', 'where',
+             "name like '%python%'",
+             'get', 'ProcessId,CommandLine', '/format:list'],
+            capture_output=True, text=True, timeout=10
+        )
+        lines = result.stdout.strip().split('\n')
+
+        current_cmd = None
+        current_pid = None
+        killed = 0
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('CommandLine='):
+                current_cmd = line[len('CommandLine='):]
+            elif line.startswith('ProcessId='):
+                try:
+                    current_pid = int(line[len('ProcessId='):])
+                except ValueError:
+                    current_pid = None
+
+                if current_cmd and current_pid and current_pid != my_pid:
+                    if 'factory_monitor' in current_cmd.lower():
+                        try:
+                            subprocess.run(
+                                ['taskkill', '/PID', str(current_pid), '/F'],
+                                capture_output=True, timeout=5
+                            )
+                            log(f"Killed old instance PID {current_pid}")
+                            killed += 1
+                        except Exception as e:
+                            log(f"Failed to kill PID {current_pid}: {e}")
+
+                current_cmd = None
+                current_pid = None
+
+        if killed:
+            log(f"Killed {killed} old instance(s)")
+        else:
+            log("No old instances found")
+    except Exception as e:
+        log(f"kill_old_instances error: {e} — continuing anyway")
+
+
 def main():
     import traceback as _tb
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+    kill_old_instances()
+
     log("=" * 60)
-    log("FACTORY MONITOR START")
+    log("FACTORY MONITOR START — V14")
     log("=" * 60)
 
     # Step 2 — fetch data via WebAPI
@@ -3302,9 +3357,8 @@ def main():
     log("── Step 5: Publishing to GitHub Pages ──")
     publish_to_github(html)
 
-    # Step 6 — Telegram alert
-    log("── Step 6: Waiting 1 minute before sending Telegram alert ──")
-    time.sleep(60)
+    # Step 6 — Telegram alert (раз на годину, контролюється маркер-файлом)
+    log("── Step 6: Telegram alert check ──")
     check_and_alert(downtimes, period_to, cycles, excel_targets)
 
     log("=" * 60)
