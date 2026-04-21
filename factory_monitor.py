@@ -1665,14 +1665,16 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _mk_js    = json.dumps([str(_m) for _m in _mk_list])
     _sk_js    = json.dumps(_sk_list)
     _col_js   = json.dumps(_col_list)
-    # Cycle events for Batch Gantt
+    # Cycle events for Batch Gantt — останні 30 днів
     _cdata = []
     try:
         if conn:
+            _gantt_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
             for _r in conn.execute(
                 "SELECT date,machine,program,start_time,end_time,duration "
-                "FROM cycle_events WHERE program NOT LIKE 'COUNTER%' "
-                "ORDER BY date,machine,start_time"
+                "FROM cycle_events WHERE program NOT LIKE 'COUNTER%' AND date >= ? "
+                "ORDER BY date,machine,start_time",
+                (_gantt_cutoff,)
             ).fetchall():
                 _s = _r[3] if _r[3] and _r[3] != "—" else None
                 if not _s:
@@ -1684,12 +1686,25 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                         _e = datetime.now().strftime("%H:%M")
                     else:
                         _e = "23:59"
+                _dc = _r[0]  # "2026-04-19" → "260419"
+                _d_short = _dc[2:4] + _dc[5:7] + _dc[8:10]
+                _s_short = _s.replace(":", "")  # "08:30" → "0830"
+                _e_short = _e.replace(":", "") if _e else _e
+                # Стискаємо ім'я програми: "WF330-903B.MIN" → "330-903B"
+                _prog = _r[2] or ""
+                _pu = _prog.upper()
+                if _pu.startswith("WF"):
+                    _prog = _prog[2:]
+                if _pu.endswith(".MIN"):
+                    _prog = _prog[:-4]
                 _cdata.append({
-                    "d": _r[0],
+                    "d": _d_short,
                     "m": (_r[1].split("_")[0] if "_" in _r[1] else _r[1]),
-                    "p": _r[2], "s": _s, "e": _e, "dur": _r[5]
+                    "p": _prog, "s": _s_short, "e": _e_short, "dur": _r[5]
                 })
-    except Exception: pass
+    except Exception as _e:
+        log(f"  gantt SQL error: {_e}")
+    log(f"  gantt: {len(_cdata)} records (last 30 days)")
     _cdata_js = json.dumps(_cdata)
     # ────────────────────────────────────────────────────────────────────
 
@@ -1895,7 +1910,10 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
 
                 if e["type"] == "cycle":
                     icon = "🟢"
-                    detail = e["program"] or "—"
+                    _prog_disp = e["program"] or "—"
+                    if _prog_disp.upper().endswith(".MIN"):
+                        _prog_disp = _prog_disp[:-4]
+                    detail = _prog_disp
                     row_class = "activity-run"
                 else:
                     icon = "🔴"
@@ -2043,7 +2061,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                     excel_col = '—'
             
             target_rows.append(
-                f'<tr><td><em>{prog}</em></td>'
+                f'<tr><td><em>{prog[:-4] if prog.upper().endswith(".MIN") else prog}</em></td>'
                 f'<td><span class="badge" style="background:#3F51B5;color:white;padding:2px 8px;border-radius:2px">OP{op_num}</span></td>'
                 f'<td>{len(current_cycles)}</td>'
                 f'<td><strong>{calc_target} min</strong></td>'
@@ -2861,6 +2879,14 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
 // ── Batch Gantt ──────────────────────────────────────────────────
 (function(){{
   var RAW_ALL={_cdata_js};
+  // Розпаковуємо стислі поля: дата "260419"→"2026-04-19", час "0830"→"08:30",
+  // програма "330-903B" → "WF330-903B" (без суфіксу .MIN)
+  RAW_ALL.forEach(function(c){{
+    if(c.d&&c.d.length===6) c.d='20'+c.d.substr(0,2)+'-'+c.d.substr(2,2)+'-'+c.d.substr(4,2);
+    if(c.s&&c.s.length===4) c.s=c.s.substr(0,2)+':'+c.s.substr(2,2);
+    if(c.e&&c.e.length===4) c.e=c.e.substr(0,2)+':'+c.e.substr(2,2);
+    if(c.p) c.p='WF'+c.p;
+  }});
   var progList=[],progColor={{}};
   var PALETTE=['#3b82f6','#22c55e','#f59e0b','#0ea5e9','#a855f7','#06b6d4','#f97316','#65a30d','#84cc16','#14b8a6'];
   RAW_ALL.forEach(function(c){{
