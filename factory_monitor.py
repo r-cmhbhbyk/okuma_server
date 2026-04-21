@@ -1669,7 +1669,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     _cdata = []
     try:
         if conn:
-            _gantt_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            _gantt_cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
             for _r in conn.execute(
                 "SELECT date,machine,program,start_time,end_time,duration "
                 "FROM cycle_events WHERE program NOT LIKE 'COUNTER%' AND date >= ? "
@@ -1704,7 +1704,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
                 })
     except Exception as _e:
         log(f"  gantt SQL error: {_e}")
-    log(f"  gantt: {len(_cdata)} records (last 30 days)")
+    log(f"  gantt: {len(_cdata)} records (last 365 days)")
     _cdata_js = json.dumps(_cdata)
     # ────────────────────────────────────────────────────────────────────
 
