@@ -1558,6 +1558,7 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     generated  = datetime.now().strftime("%d.%m.%Y %H:%M")
     period_str = f"{fmt_time(period_from)} – {fmt_time(period_to)}"
     today_str  = datetime.now().strftime("%Y-%m-%d")
+    _gen_hm    = period_to.strftime("%H:%M") if period_to else datetime.now().strftime("%H:%M")
 
     # ── Stats data ──────────────────────────────────────────────────────
     # Повний список: ALL_MACHINES з конфігу + всі що є в БД + поточні дані
@@ -2537,7 +2538,32 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
   var MK    = {_mk_js};
   var SK    = {_sk_js};
   var COLS  = {_col_js};
+  var REPORT_HM = "{_gen_hm}";
   var tCh=null, pCh=null;
+
+  // Plugin: тонка червона вертикальна лінія у момент генерації звіту.
+  // Малюється на позиції лейблу REPORT_HM (напр. "14:28"), який окремо додано в labels —
+  // тому криві дотягуються до неї, а нативний tooltip працює як на звичайних точках.
+  var reportLinePlugin = {{
+    id: 'reportLine',
+    afterDatasetsDraw: function(chart) {{
+      if (!REPORT_HM) return;
+      var iLine = chart.data.labels.indexOf(REPORT_HM);
+      if (iLine < 0) return;
+      var xLine = Math.round(chart.scales.x.getPixelForValue(iLine)) + 0.5;
+      var ca = chart.chartArea;
+      var ctx = chart.ctx;
+      ctx.save();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4,3]);
+      ctx.beginPath();
+      ctx.moveTo(xLine, ca.top);
+      ctx.lineTo(xLine, ca.bottom);
+      ctx.stroke();
+      ctx.restore();
+    }}
+  }};
 
   // ── Machine filter checkboxes ─────────────────────────────────────
   (function(){{
@@ -2644,13 +2670,21 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     var hd=HDATA[tod]||{{}};
     var hs=new Set();
     Object.values(hd).forEach(function(m){{Object.keys(m).forEach(function(h){{hs.add(parseInt(h));}});}});
-    hs.add(_now.getHours()); // завжди включаємо поточну годину
-    var hours=Array.from(hs).sort(function(a,b){{return a-b;}});
-    var labels=hours.map(function(h){{return (h<10?'0':'')+h+':00';}});
-    var d2=ds(labels,function(k,lbl){{var h=parseInt(lbl);return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:0;}});
+    var _rh = REPORT_HM ? parseInt(REPORT_HM.split(':')[0],10) : _now.getHours();
+    // Принцип: точка "HH:00" відображає ефективність попередньої години (H-1 … H).
+    // Поточна (неповна) година _rh представлена окремою точкою REPORT_HM (_rh:00 … REPORT_HM).
+    var hours=Array.from(hs).filter(function(h){{return h<_rh;}}).sort(function(a,b){{return a-b;}});
+    var labels=hours.map(function(h){{var e=(h+1)%24;return (e<10?'0':'')+e+':00';}});
+    if(REPORT_HM) labels.push(REPORT_HM);
+    var d2=ds(labels,function(k,lbl){{
+      var h;
+      if(lbl===REPORT_HM){{ h=_rh; }}
+      else {{ h=parseInt(lbl,10)-1; if(h<0) h=23; }}
+      return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:0;
+    }});
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
-    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday(d2)}});
+    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday(d2),plugins:[reportLinePlugin]}});
     requestAnimationFrame(function(){{tCh.resize();var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-today',d2);
     var ttb=document.getElementById('today-table-wrap');
@@ -2789,18 +2823,21 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     {{var _c=new Date(from+'T00:00:00'),_e=new Date(to+'T00:00:00');
       while(_c<=_e){{dates.push(localISO(_c));_c.setDate(_c.getDate()+1);}}}}
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
-    var d2=ds(dates,function(k,d){{return ALL[d]&&ALL[d][k]!=null?ALL[d][k]:0;}});
+    // Принцип: точка з датою D відображає ефективність попереднього дня (інтервал D-1 00:00 … D 00:00).
+    function _prevDay(iso){{var dt=new Date(iso+'T00:00:00');dt.setDate(dt.getDate()-1);return localISO(dt);}}
+    var d2=ds(dates,function(k,d){{var pd=_prevDay(d);return ALL[pd]&&ALL[pd][k]!=null?ALL[pd][k]:0;}});
     // Weekly average curve
     (function(){{
       var sel=getSelected();
       var selM=sel.filter(function(k){{return k!=='SITE';}});
       if(!selM.length)return;
-      // Group dates by ISO week (year+week key to handle year boundaries)
+      // Group dates by ISO week (year+week key to handle year boundaries).
+      // Агрегація проводиться за повним тижнем (дані дня D), а лише ПОЗИЦІЯ точки
+      // зсувається на кінець тижня відповідно до принципу "кінець періоду".
       var weekGroups={{}};
       dates.forEach(function(d){{
         var dt=new Date(d+'T00:00:00');
         var wn=getISOWeek(dt);
-        // use ISO year: if Jan date belongs to last year's week, use previous year
         var yr=dt.getFullYear();
         if(wn>=52&&dt.getMonth()===0)yr--;
         if(wn===1&&dt.getMonth()===11)yr++;
@@ -2824,12 +2861,13 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
         // weekend work adds bonus without inflating the denominator
         weekAvg[wk]=Math.min(100,Math.round(dayAvgs.reduce(function(a,b){{return a+b;}},0)/5));
       }});
-      // Place weekly average only at the center date of each week → smooth trend curve
+      // Принцип "кінець періоду": ставимо середньотижневу точку на останню дату групи
+      // (межа "кінець тижня" в шкалі labels).
       var weekCenter={{}};
       Object.keys(weekGroups).forEach(function(wk){{
         var wdates=weekGroups[wk];
-        var mid=wdates[Math.floor((wdates.length-1)/2)];
-        weekCenter[mid]=weekAvg[wk];
+        var end=wdates[wdates.length-1];
+        weekCenter[end]=weekAvg[wk];
       }});
       var weekData=dates.map(function(d){{
         return (weekCenter[d]!=null)?weekCenter[d]:null;
