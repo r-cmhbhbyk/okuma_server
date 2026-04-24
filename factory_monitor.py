@@ -616,6 +616,12 @@ def init_db() -> sqlite3.Connection:
             date TEXT, machine TEXT, program TEXT, start_time TEXT, end_time TEXT,
             duration INTEGER
         )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hourly_stats (
+            date TEXT, machine TEXT, hour INTEGER,
+            run_min REAL, total_min REAL,
+            PRIMARY KEY (date, machine, hour)
+        )""")
     conn.commit()
     return conn
 
@@ -655,6 +661,40 @@ def save_to_db(conn, date_str, cycles, downtimes):
                   d["start"].strftime("%H:%M"),
                   d["end"].strftime("%H:%M") if d.get("end") else "ongoing",
                   d["duration"], d["reason"]))
+
+    # Hourly stats — розподіл run/total по годинах для кожної машини.
+    # Використовується Today-графіком для відображення 7-денної історії.
+    hr_run   = defaultdict(lambda: defaultdict(float))
+    hr_total = defaultdict(lambda: defaultdict(float))
+    def _spread(mname, start_dt, end_dt, is_run):
+        cur = start_dt
+        while cur < end_dt:
+            hr_end = cur.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            seg_min = (min(end_dt, hr_end) - cur).total_seconds() / 60
+            if is_run:
+                hr_run[mname][cur.hour] += seg_min
+            hr_total[mname][cur.hour] += seg_min
+            cur = hr_end
+    for mname, c_list in cycles.items():
+        for c in c_list:
+            if c.get("start") and c.get("duration"):
+                c_end = c.get("end") or (c["start"] + timedelta(minutes=c["duration"]))
+                _spread(mname, c["start"], c_end, True)
+    for mname, d_data in downtimes.items():
+        for d in d_data.get("downtimes", []):
+            if d.get("start") and d.get("duration"):
+                d_end = d.get("end") or (d["start"] + timedelta(minutes=d["duration"]))
+                _spread(mname, d["start"], d_end, False)
+    conn.execute("DELETE FROM hourly_stats WHERE date=?", (date_str,))
+    for mname, hr_map in hr_total.items():
+        for h, total in hr_map.items():
+            run = hr_run[mname].get(h, 0)
+            conn.execute(
+                "INSERT OR REPLACE INTO hourly_stats "
+                "(date,machine,hour,run_min,total_min) VALUES (?,?,?,?,?)",
+                (date_str, mname, h, round(run, 2), round(total, 2))
+            )
+
     conn.commit()
 
 
@@ -1534,6 +1574,8 @@ def check_and_alert(downtimes, period_to, cycles, excel_targets):
             )
 
     # Відправляємо (перевірка 55 хв вже пройдена на початку функції)
+    log("Telegram: waiting 60s before sending...")
+    time.sleep(60)
     send_telegram("\n".join(lines))
     # Оновлюємо маркер — просто створюємо/перезаписуємо файл
     try:
@@ -1570,52 +1612,44 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
     except: pass
     _n_known = len(_all_known_machines) if _all_known_machines else 1
 
-    # Годинні дані з поточних cycles/downtimes
-    _hr_run   = defaultdict(lambda: defaultdict(float))
-    _hr_total = defaultdict(lambda: defaultdict(float))
+    # Годинні дані з БД за останні 7 днів (hourly_stats).
+    # save_to_db() перезаписує today, тому current-run теж включено.
+    _hourly_cutoff = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+    _hr_by_date = {}   # {date: {machine: {hour: {"r": run, "t": total}}}}
+    try:
+        if conn:
+            for _r in conn.execute(
+                "SELECT date,machine,hour,run_min,total_min FROM hourly_stats "
+                "WHERE date >= ? ORDER BY date,machine,hour",
+                (_hourly_cutoff,)
+            ).fetchall():
+                _d, _mraw, _h, _run, _tot = _r
+                _m = _canonical_machine(_mraw)
+                _hr_by_date.setdefault(_d, {}).setdefault(_m, {})[int(_h)] = {"r": _run or 0, "t": _tot or 0}
+    except Exception as _e:
+        log(f"hourly_stats load error: {_e}")
 
-    def _spread_hours(run_d, total_d, mname, start_dt, end_dt, is_run):
-        """Розподіляє тривалість події по всіх годинах що вона охоплює."""
-        cur = start_dt
-        while cur < end_dt:
-            h = cur.hour
-            hr_end = cur.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            seg_min = (min(end_dt, hr_end) - cur).total_seconds() / 60
-            if is_run:
-                run_d[mname][h] += seg_min
-            total_d[mname][h] += seg_min
-            cur = hr_end
-
-    for _mn, _cl in cycles.items():
-        for _c in _cl:
-            if _c.get("start") and _c.get("duration"):
-                _c_end = _c.get("end") or (_c["start"] + timedelta(minutes=_c["duration"]))
-                _spread_hours(_hr_run, _hr_total, _mn, _c["start"], _c_end, True)
-    for _mn, _dd2 in downtimes.items():
-        for _d in _dd2.get("downtimes", []):
-            if _d.get("start") and _d.get("duration"):
-                _d_end = _d.get("end") or (_d["start"] + timedelta(minutes=_d["duration"]))
-                _spread_hours(_hr_run, _hr_total, _mn, _d["start"], _d_end, False)
-    _all_h = set()
-    for _m in _hr_total: _all_h |= set(_hr_total[_m].keys())
-    _today_hdata = {}
-    # Додаємо всі відомі машини — ті що без даних отримують 0 для всіх годин
-    for _mn in _all_known_machines:
-        _today_hdata[_mn] = {}
+    _hdata_all = {}
+    for _d2, _per_m in _hr_by_date.items():
+        _all_h = set()
+        for _m in _per_m: _all_h |= set(_per_m[_m].keys())
+        _day_hd = {}
+        for _mn in _all_known_machines:
+            _day_hd[_mn] = {}
+            _mdata = _per_m.get(_mn, {})
+            for _h in _all_h:
+                _hd = _mdata.get(_h, {"r": 0, "t": 0})
+                _day_hd[_mn][str(_h)] = round(_hd["r"]/_hd["t"]*100) if _hd["t"] else 0
+        _day_hd["SITE"] = {}
         for _h in _all_h:
-            _t = _hr_total[_mn].get(_h, 0)
-            _r = _hr_run[_mn].get(_h, 0)
-            _today_hdata[_mn][str(_h)] = round(_r/_t*100) if _t else 0
-    _today_hdata["SITE"] = {}
-    for _h in _all_h:
-        # SITE: знаменник = середній total активних × кількість всіх машин
-        _active_tot = sum(_hr_total[_m].get(_h,0) for _m in _hr_total if _hr_total[_m].get(_h,0)>0)
-        _n_active = sum(1 for _m in _hr_total if _hr_total[_m].get(_h,0)>0)
-        _run2 = sum(_hr_run[_m].get(_h,0) for _m in _hr_run)
-        _avg_t = (_active_tot / _n_active) if _n_active else 0
-        _site_denom = _avg_t * _n_known
-        _today_hdata["SITE"][str(_h)] = min(100, round(_run2/_site_denom*100)) if _site_denom else 0
-    _hourly_js = json.dumps({today_str: _today_hdata})
+            _active_tot = sum(_per_m[_m].get(_h,{}).get("t",0) for _m in _per_m if _per_m[_m].get(_h,{}).get("t",0)>0)
+            _n_active = sum(1 for _m in _per_m if _per_m[_m].get(_h,{}).get("t",0)>0)
+            _run2 = sum(_per_m[_m].get(_h,{}).get("r",0) for _m in _per_m)
+            _avg_t = (_active_tot / _n_active) if _n_active else 0
+            _site_denom = _avg_t * _n_known
+            _day_hd["SITE"][str(_h)] = min(100, round(_run2/_site_denom*100)) if _site_denom else 0
+        _hdata_all[_d2] = _day_hd
+    _hourly_js = json.dumps(_hdata_all)
     # Ефективність за робочі години (filtered) для плашки під графіком
     _today_eff = {}
     for _mn in _all_known_machines:
@@ -2330,7 +2364,8 @@ def generate_html(cycles, downtimes, period_from, period_to, timeline_data, conn
   <div id="machine-filter" style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 8px"></div>
   <div class="two-charts">
     <div class="chart-panel">
-      <h3 class="chart-title">Today — Hourly Efficiency</h3>
+      <h3 class="chart-title" id="today-chart-title">Today — Hourly Efficiency</h3>
+      <div id="today-day-selector" style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 10px"></div>
       <div class="chart-scroll-outer"><div class="chart-wrap"><canvas id="effChartToday"></canvas></div></div>
       <div id="today-table-wrap"></div>
     </div>
@@ -2664,39 +2699,51 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     }}).join('');
   }}
 
-  function initToday(){{
+  var _selDay=null;  // обрана дата (ISO); null = today
+  function initToday(targetDate){{
     var _now=new Date();
     var tod=localISO(_now);
-    var hd=HDATA[tod]||{{}};
+    var dayISO=targetDate||_selDay||tod;
+    _selDay=dayISO;
+    var isToday=(dayISO===tod);
+    var hd=HDATA[dayISO]||{{}};
     var hs=new Set();
     Object.values(hd).forEach(function(m){{Object.keys(m).forEach(function(h){{hs.add(parseInt(h));}});}});
-    var _rh = REPORT_HM ? parseInt(REPORT_HM.split(':')[0],10) : _now.getHours();
     // Принцип: точка "HH:00" відображає ефективність попередньої години (H-1 … H).
-    // Поточна (неповна) година _rh представлена окремою точкою REPORT_HM (_rh:00 … REPORT_HM).
+    // Для сьогодні — поточна (неповна) година _rh представлена окремою точкою REPORT_HM.
+    // Для минулих днів — всі години вважаються завершеними.
+    var _rh = isToday ? (REPORT_HM ? parseInt(REPORT_HM.split(':')[0],10) : _now.getHours()) : 24;
     var hours=Array.from(hs).filter(function(h){{return h<_rh;}}).sort(function(a,b){{return a-b;}});
     var labels=hours.map(function(h){{var e=(h+1)%24;return (e<10?'0':'')+e+':00';}});
-    if(REPORT_HM) labels.push(REPORT_HM);
+    if(isToday&&REPORT_HM) labels.push(REPORT_HM);
     var d2=ds(labels,function(k,lbl){{
       var h;
-      if(lbl===REPORT_HM){{ h=_rh; }}
+      if(isToday&&lbl===REPORT_HM){{ h=_rh; }}
       else {{ h=parseInt(lbl,10)-1; if(h<0) h=23; }}
       return (hd[k]&&hd[k][String(h)]!=null)?hd[k][String(h)]:0;
     }});
     if(tCh)tCh.destroy();
     var ctx=document.getElementById('effChartToday');if(!ctx)return;
-    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday(d2),plugins:[reportLinePlugin]}});
+    var _plugins=isToday?[reportLinePlugin]:[];
+    tCh=new Chart(ctx.getContext('2d'),{{type:'line',data:{{labels:labels,datasets:d2}},options:optsToday(d2),plugins:_plugins}});
     requestAnimationFrame(function(){{tCh.resize();var sc=ctx.closest('.chart-scroll-outer');if(sc)sc.scrollLeft=sc.scrollWidth;}});
     leg('legend-today',d2);
+    var tt=document.getElementById('today-chart-title');
+    if(tt){{
+      var dStr=dayISO.slice(8,10)+'.'+dayISO.slice(5,7)+'.'+dayISO.slice(0,4);
+      tt.textContent=(isToday?'Today':dStr)+' — Hourly Efficiency';
+    }}
     var ttb=document.getElementById('today-table-wrap');
     if(ttb){{
       var sel=getSelected();
       var selM=sel.filter(function(k){{return k!=='SITE';}});
       var mAvgs={{}};
       selM.forEach(function(k){{
-        mAvgs[k]=(TEFF&&TEFF[k]!=null)?TEFF[k]:0;
+        if(isToday) mAvgs[k]=(TEFF&&TEFF[k]!=null)?TEFF[k]:0;
+        else        mAvgs[k]=(ALL[dayISO]&&ALL[dayISO][k]!=null)?ALL[dayISO][k]:0;
       }});
       var grandAvg=selM.length?Math.round(selM.reduce(function(s,k){{return s+mAvgs[k];}},0)/selM.length):0;
-      var todStr=tod.slice(8,10)+'.'+tod.slice(5,7)+'.'+tod.slice(0,4);
+      var dayStr=dayISO.slice(8,10)+'.'+dayISO.slice(5,7)+'.'+dayISO.slice(0,4);
       var hdr=sel.map(function(k){{var si=MK.indexOf(k);return '<th>'+SK[si]+'</th>';}}).join('');
       var cells=sel.map(function(k){{
         var avg=k==='SITE'?grandAvg:(mAvgs[k]||0);
@@ -2705,7 +2752,49 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       }}).join('');
       ttb.innerHTML=
         '<table class="stats-table"><thead><tr><th>Date</th>'+hdr+'</tr></thead>'+
-        '<tbody><tr><td><b>'+todStr+'</b></td>'+cells+'</tr></tbody></table>';
+        '<tbody><tr><td><b>'+dayStr+'</b></td>'+cells+'</tr></tbody></table>';
+    }}
+  }}
+
+  // Селектор днів над Today-графіком: вантажимо ISO-дати з HDATA за останні 7 днів.
+  function _initDaySelector(){{
+    var el=document.getElementById('today-day-selector');
+    if(!el) return;
+    el.innerHTML='';
+    var todISO=localISO(new Date());
+    // Показуємо останні 7 днів завжди (навіть якщо в HDATA нема даних для якогось дня —
+    // кнопка буде, чарт покаже порожньо).
+    var days=[];
+    for(var i=0;i<7;i++){{
+      var dt=new Date();dt.setDate(dt.getDate()-i);
+      days.push(localISO(dt));
+    }}
+    days.forEach(function(d){{
+      var btn=document.createElement('button');
+      btn.type='button';
+      var isTod=(d===todISO);
+      btn.textContent=isTod?'Today':(d.slice(8,10)+'.'+d.slice(5,7));
+      btn.dataset.date=d;
+      btn.style.cssText='cursor:pointer;font-size:0.75rem;font-weight:700;padding:4px 10px;'
+        +'border-radius:20px;border:2px solid #cbd5e1;background:#fff;color:#1e293b;transition:background .15s';
+      btn.addEventListener('click',function(){{
+        _selDay=btn.dataset.date;
+        Array.prototype.forEach.call(el.querySelectorAll('button'),function(b){{
+          var on=(b.dataset.date===_selDay);
+          b.style.background=on?'#3b82f6':'#fff';
+          b.style.color=on?'#fff':'#1e293b';
+          b.style.borderColor=on?'#3b82f6':'#cbd5e1';
+        }});
+        initToday(_selDay);
+      }});
+      el.appendChild(btn);
+    }});
+    // Вибираємо today за замовчуванням
+    var todBtn=el.querySelector('button[data-date="'+todISO+'"]');
+    if(todBtn){{
+      todBtn.style.background='#3b82f6';
+      todBtn.style.color='#fff';
+      todBtn.style.borderColor='#3b82f6';
     }}
   }}
 
@@ -2902,6 +2991,7 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
   }}
 
   window.initToday=initToday;
+  window.initDaySelector=_initDaySelector;
   window.updatePeriodChart=updatePeriodChart;
   window.setRange=function(n){{
     var to=new Date(),from=new Date();from.setDate(to.getDate()-n+1);
@@ -3282,6 +3372,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     gSc.addEventListener('scroll',function(){{if(_sy)return;_sy=true;pSc.scrollLeft=gSc.scrollLeft;_sy=false;}});
   }})();
   setTimeout(function(){{requestAnimationFrame(function(){{
+    if(window.initDaySelector) window.initDaySelector();
     if(window.initToday) window.initToday();
     if(window.setRange)  window.setRange(7);
   }});}},80);
