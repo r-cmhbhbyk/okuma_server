@@ -2659,13 +2659,13 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
       var data;
       if(k==='SITE'){{
         var selM=sel.filter(function(m){{return m!=='SITE';}});
-        data=labels.map(function(l){{
+        data=labels.map(function(l,idx){{
           if(!selM.length) return null;
-          var sum=selM.reduce(function(s,m){{var v=getFn(m,l);return s+(v!=null?v:0);}},0);
+          var sum=selM.reduce(function(s,m){{var v=getFn(m,l,idx);return s+(v!=null?v:0);}},0);
           return Math.round(sum/selM.length);
         }});
       }}else{{
-        data=labels.map(function(l){{var v=getFn(k,l);return v!=null?v:0;}});
+        data=labels.map(function(l,idx){{var v=getFn(k,l,idx);return v!=null?v:0;}});
       }}
       return {{label:SK[i],data:data,
         borderColor:COLS[i],backgroundColor:COLS[i]+'22',tension:0.3,
@@ -2707,16 +2707,24 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     _selDay=dayISO;
     var isToday=(dayISO===tod);
     var hd=HDATA[dayISO]||{{}};
-    var hs=new Set();
-    Object.values(hd).forEach(function(m){{Object.keys(m).forEach(function(h){{hs.add(parseInt(h));}});}});
+    // Carry-over з попереднього дня: bucket 23 (23→00) того дня = значення на межі опівночі.
+    // Та сама точка з'являється і як ОСТАННЯ "00:00" попереднього дня, і як ПЕРША "00:00" цього дня.
+    var _prevDt=new Date(dayISO+'T00:00:00');_prevDt.setDate(_prevDt.getDate()-1);
+    var prevISO=localISO(_prevDt);
+    var hdPrev=HDATA[prevISO]||{{}};
     // Принцип: точка "HH:00" відображає ефективність попередньої години (H-1 … H).
     // Для сьогодні — поточна (неповна) година _rh представлена окремою точкою REPORT_HM.
     // Для минулих днів — всі години вважаються завершеними.
     var _rh = isToday ? (REPORT_HM ? parseInt(REPORT_HM.split(':')[0],10) : _now.getHours()) : 24;
-    var hours=Array.from(hs).filter(function(h){{return h<_rh;}}).sort(function(a,b){{return a-b;}});
-    var labels=hours.map(function(h){{var e=(h+1)%24;return (e<10?'0':'')+e+':00';}});
+    // Фіксований діапазон годин 0.._rh-1 (включно з 00→01 і 23→00 для минулих днів).
+    // Якщо в HDATA для якоїсь години немає запису — точка стає 0%, а не пропадає.
+    var hours=[]; for(var _hh=0; _hh<_rh; _hh++) hours.push(_hh);
+    // Перша точка "00:00" — carry-over з попереднього дня (bucket 23).
+    var labels=['00:00'].concat(hours.map(function(h){{var e=(h+1)%24;return (e<10?'0':'')+e+':00';}}));
     if(isToday&&REPORT_HM) labels.push(REPORT_HM);
-    var d2=ds(labels,function(k,lbl){{
+    var d2=ds(labels,function(k,lbl,idx){{
+      // idx===0 — carry-over: bucket 23 попереднього дня.
+      if(idx===0) return (hdPrev[k]&&hdPrev[k]['23']!=null)?hdPrev[k]['23']:0;
       var h;
       if(isToday&&lbl===REPORT_HM){{ h=_rh; }}
       else {{ h=parseInt(lbl,10)-1; if(h<0) h=23; }}
