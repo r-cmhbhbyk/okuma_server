@@ -486,24 +486,15 @@ def _api_ts(s: str) -> datetime:
     return datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
 
 
-def fetch_from_api() -> tuple[list[dict], list[dict]]:
-    """Замінює download_both_files() + load_csv() + завантаження mr_data.
-
-    Повертає (rows, mr_data) — рядки в тому самому форматі що раніше давав CSV,
-    сумісні з усім подальшим кодом аналізу.
-
-    operation_history → GetOperationResult  (всі події RunState/Alarm/тощо)
-    machining_results → GetMachiningResult  (цикли з Counter)
-    """
+def _fetch_range_from_api(start_dt: datetime, end_dt: datetime) -> tuple[list[dict], list[dict]]:
+    """Загальний фетч даних з WebAPI за довільний діапазон [start_dt, end_dt]."""
     log("============================================================")
     log("FETCHING DATA FROM CONNECT PLAN WebAPI")
     log("============================================================")
 
     ids = ",".join(str(i) for i in PROC_RES_MAP.keys())
-    now = datetime.now()
-    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_s  = start_dt.strftime("%Y/%m/%d %H:%M:%S")
-    end_s    = now.strftime("%Y/%m/%d %H:%M:%S")
+    start_s = start_dt.strftime("%Y/%m/%d %H:%M:%S")
+    end_s   = end_dt.strftime("%Y/%m/%d %H:%M:%S")
 
     # ── 1. GetOperationResult → rows ─────────────────────────────────
     log(f"── Fetching OperationResult {start_s} … {end_s} ──")
@@ -579,6 +570,47 @@ def fetch_from_api() -> tuple[list[dict], list[dict]]:
     log("FETCH COMPLETE")
     log("============================================================")
     return rows, mr_data
+
+
+def fetch_from_api() -> tuple[list[dict], list[dict]]:
+    """Тягне дані сьогоднішньої доби — з 00:00 до now.
+
+    operation_history → GetOperationResult  (всі події RunState/Alarm/тощо)
+    machining_results → GetMachiningResult  (цикли з Counter)
+    """
+    now = datetime.now()
+    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return _fetch_range_from_api(start_dt, now)
+
+
+def finalize_yesterday(conn) -> None:
+    """Добиває вчорашні hourly_stats: останній годинний інтервал 23:00-00:00.
+
+    Основний фетч обмежений сьогоднішньою північчю, тому остання година
+    попереднього дня залишається порожньою, якщо останній запуск скрипту на
+    тій добі стався до 23:00 (звичайна ситуація для cron). Без цього на
+    графіку Hourly Efficiency точка "00:00" завжди показує 0%.
+    Виклик ідемпотентний: save_to_db DELETE/INSERT перезаписує всю добу.
+    """
+    yest_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    row = conn.execute(
+        "SELECT 1 FROM hourly_stats WHERE date=? AND hour=23 LIMIT 1",
+        (yest_str,)
+    ).fetchone()
+    if row:
+        return  # вже добито в один із попередніх запусків цього дня
+
+    log(f"── Finalizing yesterday's hourly_stats ({yest_str}) ──")
+    yest_start = datetime.strptime(yest_str, "%Y-%m-%d")
+    yest_end   = yest_start + timedelta(days=1)
+    rows, _mr = _fetch_range_from_api(yest_start, yest_end)
+    if not rows:
+        log(f"  No data for {yest_str}")
+        return
+    cycles    = analyze_cycles(rows)
+    downtimes = analyze_downtime(rows)
+    save_to_db(conn, yest_str, cycles, downtimes)
+    log(f"  Yesterday {yest_str} hourly_stats saved")
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -3492,6 +3524,11 @@ def main():
         conn = init_db()
         save_to_db(conn, date_str, cycles, downtimes)
         log("History saved to DB")
+        try:
+            finalize_yesterday(conn)
+        except Exception as _ye:
+            log(f"✗ Finalize yesterday error: {_ye}")
+            log(_tb.format_exc())
     except Exception as e:
         log(f"✗ DB error: {e}")
         log(_tb.format_exc())
