@@ -2952,9 +2952,8 @@ function localISO(d){{var y=d.getFullYear(),m=d.getMonth()+1,dd=d.getDate();retu
     {{var _c=new Date(from+'T00:00:00'),_e=new Date(to+'T00:00:00');
       while(_c<=_e){{dates.push(localISO(_c));_c.setDate(_c.getDate()+1);}}}}
     function fmtDate(s){{return s.slice(8,10)+'.'+s.slice(5,7)+'.'+s.slice(0,4);}}
-    // Принцип: точка з датою D відображає ефективність попереднього дня (інтервал D-1 00:00 … D 00:00).
-    function _prevDay(iso){{var dt=new Date(iso+'T00:00:00');dt.setDate(dt.getDate()-1);return localISO(dt);}}
-    var d2=ds(dates,function(k,d){{var pd=_prevDay(d);return ALL[pd]&&ALL[pd][k]!=null?ALL[pd][k]:0;}});
+    // Точка з датою D відображає ефективність дня D (співпадає з підписом по осі X та з Hourly Efficiency).
+    var d2=ds(dates,function(k,d){{return ALL[d]&&ALL[d][k]!=null?ALL[d][k]:0;}});
     // Weekly average curve
     (function(){{
       var sel=getSelected();
